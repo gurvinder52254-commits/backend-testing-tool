@@ -1,0 +1,35 @@
+{
+  "name": "website-tester-backend",
+  "version": "2.0.0",
+  "description": "Website Testing Platform Backend - Playwright + Gemini AI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "install-playwright": "npx playwright install chromium",
+    "analyze": "npx playwright test tests/page-analyzer.spec.ts --headed --project=chromium"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "abort-controller": "^3.0.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "if": "^2.0.0",
+    "node-fetch": "^2.7.0",
+    "ollama": "^0.6.3",
+    "playwright": "^1.40.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "uuid": "^9.0.0",
+    "website-scraper": "^6.0.0",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "nodemon": "^3.0.2"
+  },
+  "author": "WebTester",
+  "license": "ISC"
+}
