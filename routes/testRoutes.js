@@ -13,6 +13,7 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
+const { verifyGoogleToken } = require('../middleware/authMiddleware');
 
 // In-memory store for active/completed tests
 const activeTests = new Map();
@@ -22,8 +23,9 @@ const activeTests = new Map();
  * Starts a website test. Returns immediately with testId.
  * Live updates are sent via WebSocket.
  */
-router.post('/start-test', async (req, res) => {
+router.post('/start-test', verifyGoogleToken, async (req, res) => {
     try {
+        const userId = req.userId;
         let { frontendUrl, backendUrl, scanType, userDetails } = req.body;
 
         if (!frontendUrl) {
@@ -65,8 +67,8 @@ router.post('/start-test', async (req, res) => {
             message: 'Test started. Connect to WebSocket for live updates.',
         });
 
-        // Store test status
-        activeTests.set(testId, { status: 'running', startTime: Date.now() });
+        // Store test status with userId
+        activeTests.set(testId, { status: 'running', startTime: Date.now(), userId });
 
         // Run test in background
         try {
@@ -75,7 +77,17 @@ router.post('/start-test', async (req, res) => {
                 broadcast({ ...update, testId });
             });
 
-            activeTests.set(testId, { status: 'complete', report, endTime: Date.now() });
+            // Save userId into the report.json file for future filtering
+            if (report) {
+                report.userId = userId;
+                const reportDir = path.join(__dirname, '..', 'reports', testId);
+                const reportPath = path.join(reportDir, 'report.json');
+                if (fs.existsSync(reportPath)) {
+                    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+                }
+            }
+
+            activeTests.set(testId, { status: 'complete', report, endTime: Date.now(), userId });
         } catch (err) {
             activeTests.set(testId, { status: 'error', error: err.message, endTime: Date.now() });
             broadcast({
@@ -154,32 +166,40 @@ router.get('/test/:testId', (req, res) => {
  * GET /api/reports
  * List all test reports
  */
-router.get('/reports', (req, res) => {
+router.get('/reports', verifyGoogleToken, (req, res) => {
+    const userId = req.userId;
     const reportsDir = path.join(__dirname, '..', 'reports');
     try {
+        if (!fs.existsSync(reportsDir)) {
+            return res.json({ success: true, totalReports: 0, reports: [] });
+        }
         const dirs = fs.readdirSync(reportsDir).filter((f) => {
             const stat = fs.statSync(path.join(reportsDir, f));
             return stat.isDirectory();
         });
 
-        const reports = dirs.map((dir) => {
-            const reportPath = path.join(reportsDir, dir, 'report.json');
-            let report = null;
-            if (fs.existsSync(reportPath)) {
-                try {
-                    report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
-                } catch (_) {}
-            }
-            return {
-                testId: dir,
-                hasReport: !!report,
-                frontendUrl: report?.frontendUrl || 'N/A',
-                testDate: report?.testDate || 'N/A',
-                overallScore: report?.overallScore || 0,
-                totalPages: report?.totalPages || 0,
-                status: report?.status || 'unknown',
-            };
-        });
+        const reports = dirs
+            .map((dir) => {
+                const reportPath = path.join(reportsDir, dir, 'report.json');
+                let report = null;
+                if (fs.existsSync(reportPath)) {
+                    try {
+                        report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+                    } catch (_) {}
+                }
+                return {
+                    testId: dir,
+                    hasReport: !!report,
+                    userId: report?.userId || null,
+                    frontendUrl: report?.frontendUrl || 'N/A',
+                    testDate: report?.testDate || 'N/A',
+                    overallScore: report?.overallScore || 0,
+                    totalPages: report?.totalPages || 0,
+                    status: report?.status || 'unknown',
+                };
+            })
+            // Only return reports belonging to this user
+            .filter((r) => r.userId === userId);
 
         res.json({ success: true, totalReports: reports.length, reports });
     } catch (error) {
@@ -191,8 +211,9 @@ router.get('/reports', (req, res) => {
  * GET /api/reports/:testId
  * Get a specific test report by ID
  */
-router.get('/reports/:testId', (req, res) => {
+router.get('/reports/:testId', verifyGoogleToken, (req, res) => {
     const { testId } = req.params;
+    const userId = req.userId;
     const reportPath = path.join(__dirname, '..', 'reports', testId, 'report.json');
 
     if (!fs.existsSync(reportPath)) {
@@ -201,6 +222,10 @@ router.get('/reports/:testId', (req, res) => {
 
     try {
         const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+        // Security: Only the owner can view their report
+        if (report.userId && report.userId !== userId) {
+            return res.status(403).json({ success: false, error: 'Access denied. This report belongs to another user.' });
+        }
         res.json({ success: true, report });
     } catch (error) {
         res.status(500).json({ success: false, error: 'Failed to read report: ' + error.message });
