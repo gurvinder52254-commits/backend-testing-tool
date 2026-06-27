@@ -2686,16 +2686,19 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
         });
 
         browser = await chromium.launch({
-            headless: false,
-            slowMo: 300,
+            headless: true,  // Render Linux server par display nahi hota, isliye true zaroori hai
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
                 '--start-maximized',
                 '--disable-infobars',
             ],
         });
+
 
         const context = await browser.newContext({
             viewport: { width: 1920, height: 1080 },
