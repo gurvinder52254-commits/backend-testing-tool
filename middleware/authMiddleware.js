@@ -36,6 +36,7 @@ async function verifyGoogleToken(req, res, next) {
             req.userId = payload.sub;
             req.userEmail = payload.email;
             req.userName = payload.name;
+            req.userPicture = payload.picture || null;
         } else {
             // Access Token verification via Google UserInfo API
             const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -48,7 +49,22 @@ async function verifyGoogleToken(req, res, next) {
             req.userId = payload.sub;
             req.userEmail = payload.email;
             req.userName = payload.name;
+            req.userPicture = payload.picture || null;
         }
+
+        // Upsert user profile to PostgreSQL database asynchronously
+        try {
+            const User = require('../models/User');
+            await User.upsertUser({
+                id: req.userId,
+                email: req.userEmail,
+                name: req.userName,
+                picture: req.userPicture
+            });
+        } catch (dbErr) {
+            console.error('⚠️ Failed to save user to PostgreSQL:', dbErr.message);
+        }
+
         next();
     } catch (err) {
         console.error('Auth verification error:', err.message);
@@ -60,3 +76,4 @@ async function verifyGoogleToken(req, res, next) {
 }
 
 module.exports = { verifyGoogleToken };
+

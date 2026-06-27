@@ -2692,7 +2692,6 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process',
                 '--no-zygote',
                 '--start-maximized',
                 '--disable-infobars',
@@ -2724,6 +2723,9 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 timeout: 45000,
             });
         } catch (err) {
+            if (page.isClosed()) {
+                throw err;
+            }
             console.log(`⚠️ Initial load with 'load' failed, trying 'domcontentloaded'...`);
             response = await page.goto(frontendUrl, {
                 waitUntil: 'domcontentloaded',
@@ -3139,6 +3141,9 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                         timeout: 35000,
                     });
                 } catch (gotoErr) {
+                    if (page.isClosed()) {
+                        throw gotoErr;
+                    }
                     console.log(`⚠️ Failed to load ${pageInfo.href} with 'load', falling back...`);
                     pageResponse = await page.goto(pageInfo.href, {
                         waitUntil: 'domcontentloaded',
@@ -3852,9 +3857,6 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
 
         report.status = 'complete';
         report.testDurationMs = Date.now() - testStartTime;
-
-        const reportPath = path.join(testDir, 'report.json');
-        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
 
         sendUpdate({
             type: 'test-complete',
