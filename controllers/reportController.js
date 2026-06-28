@@ -90,20 +90,157 @@ async function startTest(req, res) {
       message: 'Test started. Connect to WebSocket for live updates.',
     });
 
-    // Store test status with userId in memory
-    activeTests.set(testId, { status: 'running', startTime: Date.now(), userId });
+    // Store test status with userId in memory and initialize structural placeholder
+    const activeTestState = {
+      status: 'running',
+      startTime: Date.now(),
+      userId,
+      report: {
+        testId,
+        frontendUrl,
+        backendUrl: backendUrl || null,
+        testDate: new Date().toISOString(),
+        totalPages: 0,
+        pagesCompleted: 0,
+        headerLinks: [],
+        footerLinks: [],
+        pages: [],
+        overallScore: 0,
+        status: 'running',
+        globalSummary: {
+          totalErrors: 0,
+          brokenLinks: [],
+          missingResources: [],
+          seoIssues: [],
+          elementStats: {
+            totalImages: 0,
+            totalLinks: 0,
+            totalButtons: 0,
+            totalMissingAlt: 0,
+            totalMissingSrc: 0,
+            totalDuplicateImages: 0
+          },
+          suggestedFixes: []
+        }
+      }
+    };
+    activeTests.set(testId, activeTestState);
 
     // Run Playwright scan test in background
     try {
-      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, (update) => {
+      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, async (update) => {
+        // Broadcast updates to WebSocket client
         broadcast({ ...update, testId });
+
+        try {
+          const state = activeTests.get(testId);
+          if (state && state.report) {
+            const rep = state.report;
+            if (update.type === 'links-discovered') {
+              rep.totalPages = update.totalPages;
+              rep.headerLinks = update.headerLinks || [];
+              rep.footerLinks = update.footerLinks || [];
+            } else if (update.type === 'page-complete') {
+              rep.pagesCompleted = update.pageIndex + 1;
+              const result = update.result;
+
+              const pageData = {
+                index: update.pageIndex,
+                url: result.url,
+                title: result.title,
+                text: result.title || '',
+                source: result.source || 'body',
+                loadStatus: result.loadStatus,
+                loadTimeMs: result.loadTimeMs || 0,
+                httpStatus: result.httpStatus || 200,
+                screenshotUrl: result.screenshotUrl,
+                consoleErrors: result.consoleErrors || [],
+                networkErrors: result.networkErrors || [],
+                elementsInfo: result.elementsInfo || {},
+                brokenLinksCheck: result.brokenLinksCheck || [],
+                imageCheckResults: result.imageCheckResults || [],
+                videoCheckResults: result.videoCheckResults || [],
+                aiAnalysis: result.aiAnalysis,
+                groqAnalysis: result.groqAnalysis,
+                error: result.error || null
+              };
+
+              const existingIdx = rep.pages.findIndex(p => p.url === result.url);
+              if (existingIdx >= 0) {
+                rep.pages[existingIdx] = pageData;
+              } else {
+                rep.pages.push(pageData);
+              }
+
+              rep.globalSummary.totalErrors = rep.pages.reduce((sum, p) => sum + p.consoleErrors.length + p.networkErrors.length, 0);
+
+              const scores = rep.pages
+                .filter((p) => p.aiAnalysis && p.aiAnalysis.overallScore > 0)
+                .map((p) => p.aiAnalysis.overallScore);
+              rep.overallScore = scores.length > 0
+                ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+                : 0;
+
+              // Save incremental report to database
+              await Report.upsertReport({
+                testId,
+                userId,
+                frontendUrl,
+                backendUrl: backendUrl || null,
+                testDate: rep.testDate,
+                overallScore: rep.overallScore,
+                totalPages: rep.totalPages,
+                status: 'running',
+                reportData: rep
+              });
+            } else if (update.type === 'page-error') {
+              rep.pagesCompleted = update.pageIndex + 1;
+              const pageData = {
+                index: update.pageIndex,
+                url: update.url,
+                title: 'Error',
+                text: 'Error',
+                source: 'error',
+                loadStatus: 'ERROR',
+                loadTimeMs: 0,
+                httpStatus: 500,
+                screenshotUrl: '',
+                consoleErrors: [],
+                networkErrors: [],
+                elementsInfo: {},
+                brokenLinksCheck: [],
+                imageCheckResults: [],
+                videoCheckResults: [],
+                error: update.error
+              };
+              const existingIdx = rep.pages.findIndex(p => p.url === update.url);
+              if (existingIdx >= 0) {
+                rep.pages[existingIdx] = pageData;
+              } else {
+                rep.pages.push(pageData);
+              }
+              await Report.upsertReport({
+                testId,
+                userId,
+                frontendUrl,
+                backendUrl: backendUrl || null,
+                testDate: rep.testDate,
+                overallScore: rep.overallScore,
+                totalPages: rep.totalPages,
+                status: 'running',
+                reportData: rep
+              });
+            }
+          }
+        } catch (dbErr) {
+          console.error('⚠️ Failed to save incremental update to PostgreSQL:', dbErr.message);
+        }
       });
 
-      // Save report to PostgreSQL
+      // Save final report to PostgreSQL
       if (report) {
         report.userId = userId;
 
-        // Save to PostgreSQL using Report model
         try {
           await Report.upsertReport({
             testId,
@@ -116,9 +253,9 @@ async function startTest(req, res) {
             status: report.status || 'complete',
             reportData: report
           });
-          console.log(`💾 [${testId}] Report saved to PostgreSQL database.`);
+          console.log(`💾 [${testId}] Final report saved to PostgreSQL database.`);
         } catch (dbErr) {
-          console.error('⚠️ Failed to save report to PostgreSQL:', dbErr.message);
+          console.error('⚠️ Failed to save final report to PostgreSQL:', dbErr.message);
         }
       }
 
@@ -141,27 +278,39 @@ async function startTest(req, res) {
 }
 
 /**
- * List all scan reports for the authenticated user
+ * List all scan reports for the authenticated user — with optional pagination
+ * Query params: ?page=1&limit=20
  */
 async function getReports(req, res) {
   const userId = req.userId;
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100); // cap at 100
 
-  // Try to load reports from PostgreSQL database first
+  // Try to load from PostgreSQL with pagination
   try {
-    const dbReports = await Report.findByUserId(userId);
-    if (dbReports) {
-      console.log(`📂 Loaded ${dbReports.length} reports from PostgreSQL database.`);
-      return res.json({ success: true, totalReports: dbReports.length, reports: dbReports });
-    }
+    const [reports, totalCount] = await Promise.all([
+      Report.findByUserIdPaginated(userId, page, limit),
+      Report.countByUserId(userId),
+    ]);
+    console.log(`📂 Loaded ${reports.length} reports (page ${page}) from PostgreSQL.`);
+    return res.json({
+      success: true,
+      totalReports: totalCount,
+      page,
+      limit,
+      totalPages: Math.ceil(totalCount / limit),
+      hasNextPage: page * limit < totalCount,
+      reports,
+    });
   } catch (dbErr) {
-    console.warn('⚠️ PostgreSQL reports fetch failed. Falling back to local filesystem:', dbErr.message);
+    console.warn('⚠️ PostgreSQL paginated fetch failed. Falling back to full list:', dbErr.message);
   }
 
-  // Fallback: local reports directory
+  // Fallback: local reports directory (no pagination — legacy)
   const reportsDir = path.join(__dirname, '..', 'reports');
   try {
     if (!fs.existsSync(reportsDir)) {
-      return res.json({ success: true, totalReports: 0, reports: [] });
+      return res.json({ success: true, totalReports: 0, page: 1, totalPages: 0, hasNextPage: false, reports: [] });
     }
     const dirs = fs.readdirSync(reportsDir).filter((f) => {
       const stat = fs.statSync(path.join(reportsDir, f));
@@ -190,14 +339,15 @@ async function getReports(req, res) {
       })
       .filter((r) => r.userId === userId);
 
-    res.json({ success: true, totalReports: reports.length, reports });
+    res.json({ success: true, totalReports: reports.length, page: 1, totalPages: 1, hasNextPage: false, reports });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 }
 
 /**
- * Get detailed individual report
+ * Get detailed individual report — metadata only (no pages array for large reports)
+ * The pages are fetched separately via GET /api/reports/:id/pages
  */
 async function getReport(req, res) {
   const { testId } = req.params;
@@ -228,6 +378,55 @@ async function getReport(req, res) {
     res.json({ success: true, report });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to read report: ' + error.message });
+  }
+}
+
+/**
+ * GET /api/reports/:id/pages — paginated page-level data for a report
+ * Query params: ?page=1&limit=10
+ */
+async function getReportPages(req, res) {
+  const { testId } = req.params;
+  const userId = req.userId;
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+
+  try {
+    const result = await Report.findPagesByTestId(testId, userId, page, limit);
+    if (!result) {
+      return res.status(404).json({ success: false, error: 'Report not found' });
+    }
+    const totalPageCount = result.totalPages || 0;
+    return res.json({
+      success: true,
+      pages: result.pages || [],
+      totalPages: totalPageCount,
+      page,
+      limit,
+      hasNextPage: page * limit < totalPageCount,
+    });
+  } catch (err) {
+    console.error(`⚠️ getReportPages failed for [${testId}]:`, err.message);
+    // Fallback: read from filesystem
+    const reportPath = path.join(__dirname, '..', 'reports', testId, 'report.json');
+    if (!fs.existsSync(reportPath)) {
+      return res.status(404).json({ success: false, error: 'Report not found' });
+    }
+    try {
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+      const allPages = report.pages || [];
+      const offset = (page - 1) * limit;
+      return res.json({
+        success: true,
+        pages: allPages.slice(offset, offset + limit),
+        totalPages: allPages.length,
+        page,
+        limit,
+        hasNextPage: offset + limit < allPages.length,
+      });
+    } catch (e) {
+      return res.status(500).json({ success: false, error: e.message });
+    }
   }
 }
 
@@ -397,6 +596,7 @@ module.exports = {
   startTest,
   getReports,
   getReport,
+  getReportPages,
   testLegacy,
   groqAnalyze
 };
