@@ -138,23 +138,32 @@ app.use((err, req, res, next) => {
 // ============================================================
 // Initialize & Start Server
 // ============================================================
-initializeGemini();
-initializeGroq();
+const { runMigrations } = require('./db/migrate');
 
-server.listen(PORT, () => {
-    console.log('\n' + '='.repeat(60));
-    console.log('  🚀 WEBSITE TESTING PLATFORM v2.0');
-    console.log('='.repeat(60));
-    console.log(`  🌐 HTTP Server  : http://localhost:${PORT}`);
-    console.log(`  🔗 WebSocket    : ws://localhost:${PORT}/ws`);
-    console.log(`  🔬 Test API     : POST http://localhost:${PORT}/api/start-test`);
-    console.log(`  🧠 Groq AI      : POST http://localhost:${PORT}/api/groq-analyze`);
-    console.log(`  ❤️  Health      : GET http://localhost:${PORT}/api/health`);
-    console.log(`  📁 Reports      : ${reportsDir}`);
-    console.log('='.repeat(60));
-    console.log('  ✅ Ready for connections...');
-    console.log('='.repeat(60) + '\n');
-});
+async function startServer() {
+    // Run database migrations on startup
+    await runMigrations();
+
+    initializeGemini();
+    initializeGroq();
+
+    server.listen(PORT, () => {
+        console.log('\n' + '='.repeat(60));
+        console.log('  🚀 WEBSITE TESTING PLATFORM v2.0');
+        console.log('='.repeat(60));
+        console.log(`  🌐 HTTP Server  : http://localhost:${PORT}`);
+        console.log(`  🔗 WebSocket    : ws://localhost:${PORT}/ws`);
+        console.log(`  🔬 Test API     : POST http://localhost:${PORT}/api/start-test`);
+        console.log(`  🧠 Groq AI      : POST http://localhost:${PORT}/api/groq-analyze`);
+        console.log(`  ❤️  Health      : GET http://localhost:${PORT}/api/health`);
+        console.log(`  📁 Reports      : ${reportsDir}`);
+        console.log('='.repeat(60));
+        console.log('  ✅ Ready for connections...');
+        console.log('='.repeat(60) + '\n');
+    });
+}
+
+startServer();
 
 // Graceful shutdown
 process.on('SIGINT', () => {
@@ -167,3 +176,4 @@ process.on('SIGINT', () => {
 process.on('unhandledRejection', (reason) => {
     console.error('❌ Unhandled Promise Rejection:', reason);
 });
+
