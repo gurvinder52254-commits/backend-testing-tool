@@ -4,7 +4,7 @@
  * ============================================================
  */
 
-const { runWebsiteTest } = require('../playwrightTester');
+const { runWebsiteTest, discoverDomainUrls } = require('../playwrightTester');
 const { runGroqAnalysisPipeline } = require('../groqAnalyzer');
 const { executeGroqTests } = require('../groqTestRunner');
 const { v4: uuidv4 } = require('uuid');
@@ -49,7 +49,7 @@ function getLiveTestStatus(req, res) {
 async function startTest(req, res) {
   try {
     const userId = req.userId;
-    let { frontendUrl, backendUrl, scanType, userDetails } = req.body;
+    let { frontendUrl, backendUrl, scanType, userDetails, urls } = req.body;
 
     if (!frontendUrl) {
       return res.status(400).json({
@@ -235,7 +235,7 @@ async function startTest(req, res) {
         } catch (dbErr) {
           console.error('⚠️ Failed to save incremental update to PostgreSQL:', dbErr.message);
         }
-      });
+      }, urls);
 
       // Save final report to PostgreSQL
       if (report) {
@@ -590,6 +590,53 @@ async function groqAnalyze(req, res) {
   }
 }
 
+/**
+ * POST /api/scan-domain
+ * Scans the domain to discover all internal URLs using Playwright link extraction.
+ */
+async function scanDomain(req, res) {
+  try {
+    let { frontendUrl } = req.body;
+
+    if (!frontendUrl) {
+      return res.status(400).json({
+        success: false,
+        error: 'frontendUrl is required.',
+      });
+    }
+
+    // Auto-add https if missing
+    if (!frontendUrl.startsWith('http://') && !frontendUrl.startsWith('https://')) {
+      frontendUrl = 'https://' + frontendUrl;
+    }
+
+    // Validate URL
+    try {
+      new URL(frontendUrl);
+    } catch (urlError) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid URL format. Please provide a valid URL.',
+      });
+    }
+
+    console.log(`\n📨 New domain scan request: ${frontendUrl}`);
+
+    const urls = await discoverDomainUrls(frontendUrl);
+
+    res.json({
+      success: true,
+      urls,
+    });
+  } catch (error) {
+    console.error('❌ Domain scan error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: `Server error during scan: ${error.message}`,
+    });
+  }
+}
+
 module.exports = {
   getHealth,
   getLiveTestStatus,
@@ -598,5 +645,6 @@ module.exports = {
   getReport,
   getReportPages,
   testLegacy,
-  groqAnalyze
+  groqAnalyze,
+  scanDomain
 };

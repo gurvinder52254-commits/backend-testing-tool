@@ -1,0 +1,15 @@
+{
+  "watch": ["*"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "node_modules/**",
+    "groq_results/**",
+    "groq_tests/**",
+    "reports/**",
+    "tests/**",
+    "**/*.png",
+    "**/*.jpg",
+    "**/*.jpeg",
+    "**/*.json"
+  ]
+}
