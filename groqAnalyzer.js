@@ -110,6 +110,7 @@ async function callGroqVision(base64Image, prompt, maxTokens = 4096, retryCount 
                 max_tokens: maxTokens,
                 temperature: 0.3,
             }),
+            timeout: 30000, // 30 seconds timeout to prevent indefinite hang
         });
 
         if (!response.ok) {
@@ -147,7 +148,7 @@ async function callGroqVision(base64Image, prompt, maxTokens = 4096, retryCount 
         const data = await response.json();
         return data.choices[0]?.message?.content || '';
     } catch (error) {
-        if (retryCount < MAX_RETRIES && (error.message.includes('ETIMEDOUT') || error.message.includes('ECONNRESET'))) {
+        if (retryCount < MAX_RETRIES && (error.message.includes('ETIMEDOUT') || error.message.includes('ECONNRESET') || error.message.toLowerCase().includes('timeout'))) {
             console.warn(`🔌 Connection issues. Retrying... (Attempt ${retryCount + 1}/${MAX_RETRIES})`);
             await sleep(2000);
             return callGroqVision(base64Image, prompt, maxTokens, retryCount + 1);

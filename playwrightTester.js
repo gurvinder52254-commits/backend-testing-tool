@@ -2635,9 +2635,10 @@ if (!fs.existsSync(REPORTS_DIR)) {
  * @param {string} scanType - 'domain' or 'url'
  * @param {object[]} userDetails - Key-value pair configs for testing
  * @param {function} sendUpdate - Callback to send live updates
+ * @param {object[]} [urlsToTest] - Specific URLs to test (optional)
  * @returns {object} Complete test report
  */
-async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, sendUpdate) {
+async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, sendUpdate, urlsToTest) {
     const testStartTime = Date.now();
     const testDir = path.join(REPORTS_DIR, testId);
     if (!fs.existsSync(testDir)) {
@@ -2787,7 +2788,16 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 isSameDomain(href);
         };
 
-        if (scanType !== 'url') {
+        let allPages = [];
+        if (urlsToTest && Array.isArray(urlsToTest) && urlsToTest.length > 0) {
+            allPages = urlsToTest.map((p, idx) => {
+                if (typeof p === 'string') {
+                    return { href: p, text: p === frontendUrl ? 'Homepage' : `Custom URL ${idx + 1}`, source: 'custom' };
+                }
+                return { href: p.url || p.href, text: p.text || 'URL', source: p.source || 'custom' };
+            });
+        } else {
+            if (scanType !== 'url') {
             // STEP 3: Extract Header Navigation Links
             sendUpdate({
                 type: 'status',
@@ -2935,7 +2945,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
             });
         }
 
-        let allPages = Array.from(allLinksMap.values());
+        allPages = Array.from(allLinksMap.values());
 
         // STEP 4.6: Deep crawl — visit discovered pages to find MORE links (depth 2)
         if (scanType !== 'url' && allPages.length > 1) {
@@ -2997,7 +3007,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
 
             // Navigate back to homepage for testing
             await page.goto(frontendUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => { });
-            await page.waitForTimeout(1000);
+        }
         }
 
         report.totalPages = allPages.length;
@@ -3753,7 +3763,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                             groqResult.playwrightCode.testCode,
                             pageInfo.href,
                             groqResult.playwrightCode.testFileName || 'groq_test.spec.js',
-                            sendUpdate
+                            sendUpdate,
+                            page
                         );
                         groqResult.executionResults = executionResults;
                     }
@@ -3916,4 +3927,243 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
     }
 }
 
-module.exports = { runWebsiteTest };
+/**
+ * Scans a domain to discover and extract all unique internal page links
+ * @param {string} frontendUrl - The domain URL to scan
+ * @returns {Promise<object[]>} List of discovered page objects { url, text, source }
+ */
+async function discoverDomainUrls(frontendUrl) {
+    let browser = null;
+    try {
+        if (!frontendUrl.startsWith('http://') && !frontendUrl.startsWith('https://')) {
+            frontendUrl = 'https://' + frontendUrl;
+        }
+
+        browser = await chromium.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-zygote',
+                '--start-maximized',
+                '--disable-infobars',
+            ],
+        });
+
+        const context = await browser.newContext({
+            viewport: { width: 1920, height: 1080 },
+            userAgent:
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            ignoreHTTPSErrors: true,
+        });
+
+        const page = await context.newPage();
+        
+        try {
+            await page.goto(frontendUrl, { waitUntil: 'load', timeout: 30000 });
+        } catch (err) {
+            console.log(`⚠️ Discover: initial load with 'load' failed, trying 'domcontentloaded'...`);
+            await page.goto(frontendUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        }
+        await page.waitForTimeout(2000);
+
+        // Scroll the page to trigger lazy loaded items
+        await page.evaluate(async () => {
+            await new Promise((resolve) => {
+                let totalHeight = 0;
+                const distance = 100;
+                const timer = setInterval(() => {
+                    const scrollHeight = document.body.scrollHeight;
+                    window.scrollBy(0, distance);
+                    totalHeight += distance;
+
+                    if (totalHeight >= scrollHeight) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 80);
+            });
+        });
+        await page.waitForTimeout(1000);
+
+        const homeTitle = await page.title();
+
+        let baseDomain = '';
+        try {
+            baseDomain = new URL(frontendUrl).hostname.replace(/^www\./, '');
+        } catch (e) { }
+
+        const isSameDomain = (href) => {
+            try {
+                const linkDomain = new URL(href).hostname.replace(/^www\./, '');
+                return linkDomain === baseDomain;
+            } catch (e) { return false; }
+        };
+
+        const isValidPageLink = (href) => {
+            return href &&
+                href.startsWith('http') &&
+                !href.includes('#') &&
+                !href.startsWith('javascript:') &&
+                !href.startsWith('mailto:') &&
+                !href.startsWith('tel:') &&
+                !href.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|mp4|mp3|doc|docx|xls|xlsx|ppt|css|js|json|xml|woff|woff2|ttf|eot)$/i) &&
+                isSameDomain(href);
+        };
+
+        // Extract Header Navigation Links
+        const headerLinks = await page.evaluate(() => {
+            const links = [];
+            const selectors = [
+                'header a[href]', 'nav a[href]', '[role="navigation"] a[href]',
+                '.navbar a[href]', '.nav a[href]', '.header a[href]', '.menu a[href]',
+                '.main-nav a[href]', '.dropdown-menu a[href]', '.sub-menu a[href]',
+                '.mega-menu a[href]', '[class*="dropdown"] a[href]', '[class*="submenu"] a[href]'
+            ];
+            const seen = new Set();
+            for (const selector of selectors) {
+                document.querySelectorAll(selector).forEach((a) => {
+                    const href = a.href;
+                    const text = a.textContent.trim().substring(0, 100);
+                    if (href && href.startsWith('http') && !seen.has(href) && !href.includes('#') && !href.startsWith('javascript:') && !href.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|mp4|mp3)$/i)) {
+                        seen.add(href);
+                        links.push({ href, text: text || 'No Text', source: 'header' });
+                    }
+                });
+            }
+            return links;
+        });
+
+        // Extract Footer Links
+        const footerLinks = await page.evaluate(() => {
+            const links = [];
+            const selectors = ['footer a[href]', '.footer a[href]', '#footer a[href]', '.site-footer a[href]'];
+            const seen = new Set();
+            for (const selector of selectors) {
+                document.querySelectorAll(selector).forEach((a) => {
+                    const href = a.href;
+                    const text = a.textContent.trim().substring(0, 100);
+                    if (href && href.startsWith('http') && !seen.has(href) && !href.includes('#') && !href.startsWith('javascript:') && !href.match(/\.(pdf|zip|png|jpg|jpeg|gif|svg|ico|mp4|mp3)$/i)) {
+                        seen.add(href);
+                        links.push({ href, text: text || 'No Text', source: 'footer' });
+                    }
+                });
+            }
+            return links;
+        });
+
+        // Extract Body/Content Links
+        let bodyLinks = await page.evaluate(() => {
+            const links = [];
+            const seen = new Set();
+            document.querySelectorAll('a[href]').forEach((a) => {
+                const href = a.href;
+                const text = a.textContent.trim().substring(0, 100);
+                if (href && href.startsWith('http') && !seen.has(href) && !href.startsWith('javascript:') && !href.startsWith('mailto:') && !href.startsWith('tel:')) {
+                    try {
+                        const url = new URL(href);
+                        if (url.hash && url.origin + url.pathname === window.location.origin + window.location.pathname) return;
+                    } catch (e) { }
+                    seen.add(href);
+                    links.push({ href, text: text || 'No Text', source: 'body' });
+                }
+            });
+            return links;
+        });
+
+        // Expose dropdown links by hovering
+        try {
+            const navItems = await page.locator('nav li, .navbar li, .menu li, header li').all();
+            for (const item of navItems.slice(0, 15)) {
+                try {
+                    await item.hover({ timeout: 400 }).catch(() => { });
+                } catch (e) { }
+            }
+            const dropdownLinks = await page.evaluate(() => {
+                const links = [];
+                const seen = new Set();
+                document.querySelectorAll('.dropdown-menu a[href], .sub-menu a[href], [class*="dropdown"] a[href], [class*="submenu"] a[href], .mega-menu a[href]').forEach((a) => {
+                    const href = a.href;
+                    const text = a.textContent.trim().substring(0, 100);
+                    if (href && href.startsWith('http') && !seen.has(href) && !href.startsWith('javascript:')) {
+                        seen.add(href);
+                        links.push({ href, text: text || 'No Text', source: 'dropdown' });
+                    }
+                });
+                return links;
+            });
+            bodyLinks = [...bodyLinks, ...dropdownLinks];
+        } catch (e) { }
+
+        // Combine unique links
+        const allLinksMap = new Map();
+        allLinksMap.set(frontendUrl, { href: frontendUrl, text: homeTitle || 'Homepage', source: 'homepage' });
+
+        [...headerLinks, ...footerLinks, ...bodyLinks].forEach((link) => {
+            let normalizedHref = link.href;
+            try {
+                const u = new URL(normalizedHref);
+                normalizedHref = u.origin + u.pathname.replace(/\/+$/, '') + u.search;
+            } catch (e) { }
+
+            if (!allLinksMap.has(normalizedHref) && isValidPageLink(link.href)) {
+                allLinksMap.set(normalizedHref, { ...link, href: normalizedHref });
+            }
+        });
+
+        let allPages = Array.from(allLinksMap.values());
+
+        // Fast crawl up to 10 sub-pages
+        const pagesToDeepCrawl = allPages.slice(1, 11);
+        for (const pageInfo of pagesToDeepCrawl) {
+            try {
+                await page.goto(pageInfo.href, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
+                await page.waitForTimeout(200);
+
+                const subPageLinks = await page.evaluate(() => {
+                    const links = [];
+                    const seen = new Set();
+                    document.querySelectorAll('a[href]').forEach((a) => {
+                        const href = a.href;
+                        const text = a.textContent.trim().substring(0, 100);
+                        if (href && href.startsWith('http') && !seen.has(href) && !href.startsWith('javascript:') && !href.startsWith('mailto:') && !href.startsWith('tel:')) {
+                            seen.add(href);
+                            links.push({ href, text: text || 'No Text', source: 'deep-crawl' });
+                        }
+                    });
+                    return links;
+                });
+
+                for (const link of subPageLinks) {
+                    let normalizedHref = link.href;
+                    try {
+                        const u = new URL(normalizedHref);
+                        normalizedHref = u.origin + u.pathname.replace(/\/+$/, '') + u.search;
+                    } catch (e) { }
+
+                    if (!allLinksMap.has(normalizedHref) && isValidPageLink(link.href)) {
+                        allLinksMap.set(normalizedHref, { ...link, href: normalizedHref });
+                    }
+                }
+            } catch (e) {
+                // Ignore page crawl failures
+            }
+        }
+
+        allPages = Array.from(allLinksMap.values());
+        return allPages.map(p => ({
+            url: p.href,
+            text: p.text,
+            source: p.source
+        }));
+
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
+    }
+}
+
+module.exports = { runWebsiteTest, discoverDomainUrls };

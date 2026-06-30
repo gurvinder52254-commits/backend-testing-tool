@@ -33,7 +33,7 @@ const RESULTS_DIR = path.join(__dirname, 'groq_results');
  * @param {function} sendUpdate - Callback for live updates
  * @returns {object} Execution results
  */
-async function executeGroqTests(testCode, pageUrl, testFileName, sendUpdate) {
+async function executeGroqTests(testCode, pageUrl, testFileName, sendUpdate, existingPage) {
     const runId = uuidv4().substring(0, 8);
     const results = {
         runId,
@@ -67,6 +67,8 @@ async function executeGroqTests(testCode, pageUrl, testFileName, sendUpdate) {
     }
 
     let browser = null;
+    let page = existingPage;
+    let context = null;
 
     try {
         // Parse test descriptions from code
@@ -83,24 +85,26 @@ async function executeGroqTests(testCode, pageUrl, testFileName, sendUpdate) {
             });
         }
 
-        // Launch browser for test execution
-        browser = await chromium.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        });
+        // Only launch a new browser if no existing page was passed
+        if (!page) {
+            browser = await chromium.launch({
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            });
 
-        const context = await browser.newContext({
-            viewport: { width: 1920, height: 1080 },
-            ignoreHTTPSErrors: true,
-        });
+            context = await browser.newContext({
+                viewport: { width: 1920, height: 1080 },
+                ignoreHTTPSErrors: true,
+            });
 
-        const page = await context.newPage();
+            page = await context.newPage();
 
-        // Navigate to the target URL
-        await page.goto(pageUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {
-            return page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        });
-        await page.waitForTimeout(2000);
+            // Navigate to the target URL
+            await page.goto(pageUrl, { waitUntil: 'load', timeout: 30000 }).catch(() => {
+                return page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+            });
+            await page.waitForTimeout(2000);
+        }
 
         // Run each test description as an individual check
         for (let i = 0; i < testDescriptions.length; i++) {
@@ -176,6 +180,13 @@ async function executeGroqTests(testCode, pageUrl, testFileName, sendUpdate) {
         results.status = 'error';
         results.error = error.message;
     } finally {
+        if (existingPage && page) {
+            try {
+                if (page.url() !== pageUrl) {
+                    await page.goto(pageUrl, { waitUntil: 'load', timeout: 15000 }).catch(() => {});
+                }
+            } catch (e) {}
+        }
         if (browser) {
             await browser.close();
         }
