@@ -16,7 +16,8 @@ const {
   getReportPages,
   testLegacy,
   groqAnalyze,
-  scanDomain
+  scanDomain,
+  getScanStatus
 } = require('../controllers/reportController');
 
 // REST API Endpoints
@@ -43,6 +44,7 @@ router.post('/login', verifyGoogleToken, (req, res) => {
 });
 router.post('/start-test', verifyGoogleToken, startTest);
 router.post('/scan-domain', verifyGoogleToken, scanDomain);
+router.get('/scan-status/:jobId', verifyGoogleToken, getScanStatus);
 router.get('/reports', verifyGoogleToken, getReports);
 router.get('/reports/:testId/pages', verifyGoogleToken, getReportPages);
 router.get('/reports/:testId', verifyGoogleToken, getReport);

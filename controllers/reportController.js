@@ -5,6 +5,7 @@
  */
 
 const { runWebsiteTest, discoverDomainUrls } = require('../playwrightTester');
+const scanQueue = require('../utils/scanQueue');
 const { runGroqAnalysisPipeline } = require('../groqAnalyzer');
 const { executeGroqTests } = require('../groqTestRunner');
 const { v4: uuidv4 } = require('uuid');
@@ -622,17 +623,53 @@ async function scanDomain(req, res) {
 
     console.log(`\n📨 New domain scan request: ${frontendUrl}`);
 
-    const urls = await discoverDomainUrls(frontendUrl);
+    // Queue the job using the custom ScanQueue
+    const job = scanQueue.addJob(async (data) => {
+      return await discoverDomainUrls(data.frontendUrl);
+    }, { frontendUrl });
 
     res.json({
       success: true,
-      urls,
+      jobId: job.id,
+      status: job.state, // queued
     });
   } catch (error) {
     console.error('❌ Domain scan error:', error.message);
     res.status(500).json({
       success: false,
       error: `Server error during scan: ${error.message}`,
+    });
+  }
+}
+
+/**
+ * GET /api/scan-status/:jobId
+ * Check the status of a queued/active domain scan job
+ */
+async function getScanStatus(req, res) {
+  try {
+    const { jobId } = req.params;
+    const job = scanQueue.getJob(jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: 'Job not found',
+      });
+    }
+
+    res.json({
+      success: true,
+      jobId: job.id,
+      status: job.state, // queued, active, completed, failed
+      result: job.result,
+      error: job.error,
+    });
+  } catch (error) {
+    console.error('❌ Get scan status error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: `Server error checking status: ${error.message}`,
     });
   }
 }
@@ -646,5 +683,6 @@ module.exports = {
   getReportPages,
   testLegacy,
   groqAnalyze,
-  scanDomain
+  scanDomain,
+  getScanStatus
 };
