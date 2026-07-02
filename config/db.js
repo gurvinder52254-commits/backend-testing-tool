@@ -14,14 +14,23 @@ const sslConfig = connectionString && !connectionString.includes('localhost') &&
   : false;
 
 const pool = connectionString
-  ? new Pool({ connectionString, ssl: sslConfig })
+  ? new Pool({ 
+      connectionString, 
+      ssl: sslConfig,
+      max: 50, // Max 50 active pool clients
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    })
   : new Pool({
       host: process.env.DB_HOST || 'localhost',
       port: process.env.DB_PORT || 5432,
       user: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASSWORD,
       database: process.env.DB_NAME || 'webtest',
-      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+      ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      max: 50,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
     });
 
 module.exports = { pool };

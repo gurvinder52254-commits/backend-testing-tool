@@ -97,6 +97,23 @@ async function runMigrations() {
       );
     `);
 
+    // 3. Link Status Cache Table — persistent URL status across test runs
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS link_status_cache (
+        id SERIAL PRIMARY KEY,
+        domain VARCHAR(500) NOT NULL,
+        url TEXT NOT NULL,
+        normalized_url TEXT NOT NULL,
+        status INTEGER DEFAULT 0,
+        reason TEXT,
+        last_checked TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(domain, normalized_url)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_link_cache_domain ON link_status_cache(domain);
+    `);
+
     client.release();
     console.log('✅ DB Migration: Tables initialized successfully.');
     return true;

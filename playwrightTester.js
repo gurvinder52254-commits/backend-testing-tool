@@ -2621,6 +2621,7 @@ const { analyzeScreenshot } = require('./geminiAnalyzer');
 const { runGroqAnalysisPipeline } = require('./groqAnalyzer');
 const { executeGroqTests } = require('./groqTestRunner');
 const fetch = require('node-fetch');
+const LinkCache = require('./models/LinkCache');
 
 const REPORTS_DIR = path.join(__dirname, 'reports');
 if (!fs.existsSync(REPORTS_DIR)) {
@@ -3026,6 +3027,62 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
         console.log(`   Footer links: ${footerLinks.length}`);
         console.log(`   Body links: ${bodyLinks.length}`);
         console.log(`   Total unique pages to test: ${allPages.length}\n`);
+
+        // ============================================================
+        // BROKEN LINKS URL CACHE — Session-level (cross-page) + DB (cross-run)
+        // ============================================================
+        // key:   normalized URL string
+        // value: { status, reason, fromPage }
+        const linkStatusCache = new Map();
+
+        // Extract domain for DB cache keying
+        let targetDomain = '';
+        try { targetDomain = new URL(frontendUrl).hostname.replace(/^www\./, ''); } catch (e) {}
+
+        // Helper: normalize a URL for cache key (strip hash, trailing slash)
+        function normalizeLinkUrl(href) {
+            if (!href || href === 'MISSING') return href || 'MISSING';
+            if (href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:')) return href;
+            try {
+                const u = new URL(href);
+                return u.origin + u.pathname.replace(/\/+$/, '') + u.search;
+            } catch {
+                return href.trim();
+            }
+        }
+
+        // Helper: determine link status from href alone (no HTTP fetch — mirrors current logic)
+        function determineLinkStatus(link) {
+            const href = link.href;
+            if (!href || href === 'MISSING' || href.trim() === '') {
+                return { status: 0, reason: 'Missing href' };
+            }
+            if (href === '#') {
+                return { status: 0, reason: 'Placeholder href (#)' };
+            }
+            if (href.startsWith('javascript:')) {
+                return { status: 0, reason: 'JavaScript pseudo-link' };
+            }
+            if (href.startsWith('mailto:') || href.startsWith('tel:')) {
+                return { status: 200, reason: 'Protocol link (mailto/tel)' };
+            }
+            if (link.isDuplicate) {
+                return { status: 200, reason: 'Duplicate Link' };
+            }
+            return { status: 200, reason: 'Link Discovered' };
+        }
+
+        // Pre-load DB cache for this domain into the in-memory Map
+        // This means previously seen URLs (from past test runs) are instantly available
+        try {
+            const dbCached = await LinkCache.getBulkForDomain(targetDomain);
+            for (const [normUrl, entry] of dbCached.entries()) {
+                // fromPage -1 = came from persistent DB cache (prior test run)
+                linkStatusCache.set(normUrl, { status: entry.status, reason: entry.reason, fromPage: -1 });
+            }
+        } catch (cachePreloadErr) {
+            console.warn('⚠️ Could not pre-load link cache from DB:', cachePreloadErr.message);
+        }
 
         // STEP 5: Visit Each Page
         for (let i = 0; i < allPages.length; i++) {
@@ -3639,14 +3696,16 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     pageResult.videoCheckResults = [];
                 }
 
-                // --- BROKEN LINK VERIFICATION (actual HTTP checks) ---
+                // --- BROKEN LINK VERIFICATION (cache-aware, cross-page deduplication) ---
+                // New URLs are evaluated and cached; previously seen URLs are served from cache.
                 sendUpdate({
                     type: 'status',
-                    message: `Checking links on page ${pageIndex + 1} for broken URLs...`,
+                    message: `Checking links on page ${pageIndex + 1} — deduplication cache active...`,
                     step: 'broken-link-check',
                 });
 
                 try {
+                    // Extract all anchor tags from the current page DOM
                     const allPageLinks = await page.evaluate(() => {
                         const anchors = Array.from(document.querySelectorAll('a'));
                         const results = [];
@@ -3684,17 +3743,69 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                         return results;
                     });
 
-                    const linksToCheck = allPageLinks;
                     const allLinksList = [];
+                    // Collect new (uncached) URLs to flush to DB in one batch
+                    const newDbEntries = [];
+                    let cachedCount = 0;
+                    let newCount = 0;
 
-                    for (const link of linksToCheck) {
-                        allLinksList.push({
-                            text: link.text || 'No Text Found',
-                            href: link.href,
-                            isDuplicate: link.isDuplicate,
-                            status: 200,
-                            reason: link.isDuplicate ? 'Duplicate Link' : 'Link Discovered'
-                        });
+                    for (const link of allPageLinks) {
+                        const normKey = normalizeLinkUrl(link.href);
+
+                        if (linkStatusCache.has(normKey)) {
+                            // ✅ Cache HIT — reuse result from a previous page or prior test run
+                            const cached = linkStatusCache.get(normKey);
+                            const fromLabel = cached.fromPage === -1
+                                ? 'DB cache'
+                                : `page ${cached.fromPage + 1}`;
+                            allLinksList.push({
+                                text: link.text || 'No Text Found',
+                                href: link.href,
+                                isDuplicate: link.isDuplicate,
+                                status: cached.status,
+                                reason: `${cached.reason} (cached from ${fromLabel})`,
+                                fromCache: true,
+                                cachedFromPage: cached.fromPage
+                            });
+                            cachedCount++;
+                        } else {
+                            // 🆕 Cache MISS — evaluate this URL and store in cache
+                            const determined = determineLinkStatus(link);
+
+                            // Store in in-session memory cache
+                            linkStatusCache.set(normKey, {
+                                status: determined.status,
+                                reason: determined.reason,
+                                fromPage: pageIndex
+                            });
+
+                            // Queue for batch DB flush (only valid absolute URLs)
+                            if (link.href && link.href !== 'MISSING' && link.href.startsWith('http')) {
+                                newDbEntries.push({
+                                    url: link.href,
+                                    normalizedUrl: normKey,
+                                    status: determined.status,
+                                    reason: determined.reason
+                                });
+                            }
+
+                            allLinksList.push({
+                                text: link.text || 'No Text Found',
+                                href: link.href,
+                                isDuplicate: link.isDuplicate,
+                                status: determined.status,
+                                reason: determined.reason,
+                                fromCache: false
+                            });
+                            newCount++;
+                        }
+                    }
+
+                    // Batch-persist new entries to DB cache (fire-and-forget, non-blocking)
+                    if (newDbEntries.length > 0 && targetDomain) {
+                        LinkCache.setBulk(targetDomain, newDbEntries).catch(err =>
+                            console.warn('⚠️ LinkCache DB flush error:', err.message)
+                        );
                     }
 
                     pageResult.brokenLinksCheck = allLinksList;
@@ -3704,7 +3815,19 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                         pageResult.elementsInfo.counts.linksChecked = allLinksList.length;
                     }
 
-                    console.log(`   🔗 [Page ${pageIndex + 1}] Found ${allLinksList.length} links to display.`);
+                    console.log(`   🔗 [Page ${pageIndex + 1}] Links: ${allLinksList.length} total | ✅ ${cachedCount} from cache | 🆕 ${newCount} newly evaluated`);
+
+                    // Notify frontend with cache stats
+                    sendUpdate({
+                        type: 'link-check-complete',
+                        pageIndex,
+                        url: pageInfo.href,
+                        totalLinks: allLinksList.length,
+                        cachedLinks: cachedCount,
+                        newLinks: newCount,
+                        cacheSize: linkStatusCache.size
+                    });
+
                 } catch (blErr) {
                     console.log('List links error:', blErr.message);
                     pageResult.brokenLinksCheck = [];
