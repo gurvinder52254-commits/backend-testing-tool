@@ -29,6 +29,7 @@ const log = createLogger('ai-service');
 
 const { analyzeScreenshot, initializeGemini } = require('../../geminiAnalyzer');
 const { runGroqAnalysisPipeline, initializeGroq } = require('../../groqAnalyzer');
+const { analyzeResponsive, initResponsiveAI, getDefaultResponsive } = require('./responsiveAnalyzer');
 
 const DEFAULT_ANALYSIS = {
   overallScore: 0,
@@ -111,10 +112,46 @@ app.post('/analyze', async (req, res) => {
   res.json({ aiAnalysis, groqAnalysis });
 });
 
+/**
+ * POST /analyze-responsive
+ * body: { desktopPath, mobilePath, url, title }
+ * returns: { responsiveAnalysis }
+ * Sends BOTH screenshots to Gemini in one multimodal call.
+ */
+app.post('/analyze-responsive', async (req, res) => {
+  const { desktopPath, mobilePath, url, title } = req.body || {};
+
+  if (!config.aiEnabled) {
+    return res.json({
+      responsiveAnalysis: getDefaultResponsive('AI disabled (MS_AI_ENABLED!=true).'),
+      skipped: true,
+    });
+  }
+  if (!desktopPath || !mobilePath) {
+    return res
+      .status(400)
+      .json({ success: false, error: 'desktopPath and mobilePath are required.' });
+  }
+
+  let responsiveAnalysis;
+  try {
+    responsiveAnalysis = await withTimeout(
+      analyzeResponsive(desktopPath, mobilePath, url, title),
+      config.limits.aiTimeoutMs,
+      'Responsive'
+    );
+  } catch (err) {
+    log.warn('Responsive analysis failed:', err.message);
+    responsiveAnalysis = getDefaultResponsive(err.message);
+  }
+  res.json({ responsiveAnalysis });
+});
+
 function start() {
   if (config.aiEnabled) {
     initializeGemini();
     initializeGroq();
+    initResponsiveAI();
     log.info('AI providers initialized (MS_AI_ENABLED=true).');
   } else {
     log.warn('MS_AI_ENABLED is not "true" — /analyze returns defaults, no paid API calls.');

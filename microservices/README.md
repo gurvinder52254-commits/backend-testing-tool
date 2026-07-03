@@ -82,6 +82,25 @@ structurally — only the LLM score/inventory is skipped.
 { "type": "test-complete", "testId": "abc12345", "eventId": 20, "overallScore": 78 }
 ```
 
+## Responsive capture (desktop + mobile)
+
+Every tested page now produces **two** full-page screenshots and (when AI is on)
+a responsive-design analysis:
+
+- Capture: `worker/pageTester.js` (desktop, 1920×1080 Windows) + `worker/responsiveCapture.js`
+  (mobile, iPhone-13 emulation). Profiles in `worker/devices.js`.
+- AI: `POST :4002/analyze-responsive` `{ desktopPath, mobilePath, url, title }` →
+  sends BOTH images to Gemini in ONE multimodal call (`ai-service/responsiveAnalyzer.js`).
+- Page result gains:
+  ```jsonc
+  "screenshots": { "desktop": { "url", "viewport" }, "mobile": { "url", "viewport" } },
+  "responsiveAnalysis": { "overallScore", "desktop", "mobile", "responsive", "summary" }
+  ```
+  Frontend can render a Mobile/Desktop toggle from `screenshots`.
+
+Cost note: with `MS_AI_ENABLED=true`, each page makes the single-shot analysis **plus**
+one responsive (2-image) call. With AI off, both return defaults (no paid calls).
+
 ## Production scale-up (not required to run)
 
 - Swap `shared/queue.js` for a BullMQ/Redis implementation (same

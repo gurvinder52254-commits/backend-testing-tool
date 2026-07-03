@@ -67,6 +67,26 @@ async function requestAiAnalysis(payload) {
   }
 }
 
+// best-effort call to the responsive (desktop+mobile) analysis endpoint
+async function requestResponsiveAnalysis(payload) {
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), config.limits.aiTimeoutMs + 5000);
+    const res = await fetch(`${config.urls.ai}/analyze-responsive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`AI service HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    log.warn('Responsive analysis unavailable:', err.message);
+    return { responsiveAnalysis: null };
+  }
+}
+
 // ---- discovery handler ----
 async function handleDiscovery(data) {
   const { testId, userId, frontendUrl, userDetails, urls: providedUrls } = data;
@@ -154,7 +174,30 @@ async function handlePageTest(data) {
     result.aiAnalysis = ai.aiAnalysis || null;
     result.groqAnalysis = ai.groqAnalysis || null;
   }
-  delete result.screenshotPath; // internal-only; keep the URL for clients
+
+  // Responsive (desktop + mobile) analysis — both screenshots to AI in one call.
+  if (result.desktopPath && result.mobilePath) {
+    const r = await requestResponsiveAnalysis({
+      desktopPath: result.desktopPath,
+      mobilePath: result.mobilePath,
+      url,
+      title: result.title,
+    });
+    result.responsiveAnalysis = r.responsiveAnalysis || null;
+    // Keep overall scoring working even if the single-shot analysis was skipped.
+    if ((!result.aiAnalysis || !result.aiAnalysis.overallScore) && result.responsiveAnalysis) {
+      result.aiAnalysis = {
+        overallScore: result.responsiveAnalysis.overallScore || 0,
+        summary: result.responsiveAnalysis.summary,
+        source: 'responsive',
+      };
+    }
+  }
+
+  // internal-only fields; clients get the URLs via result.screenshots
+  delete result.screenshotPath;
+  delete result.desktopPath;
+  delete result.mobilePath;
 
   await scanStore.savePage(testId, pageIndex, url, result);
   await emitEvent({

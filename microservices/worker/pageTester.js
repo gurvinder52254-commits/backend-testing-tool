@@ -19,6 +19,8 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../shared/config');
+const { captureViewport } = require('./responsiveCapture');
+const { PROFILES } = require('./devices');
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -34,6 +36,7 @@ function emptyResult(index, url) {
     loadTimeMs: 0,
     httpStatus: 0,
     screenshotUrl: '',
+    screenshots: { desktop: null, mobile: null },
     consoleErrors: [],
     networkErrors: [],
     elementsInfo: {},
@@ -154,20 +157,36 @@ async function testPage(browser, { testId, pageIndex, url, source = 'body', text
       })
       .catch(() => ({}));
 
-    // --- screenshot (saved to the shared reports dir, timeout-guarded) ---
+    // --- DESKTOP screenshot (reuses this context; timeout-guarded) ---
     try {
       const dir = path.join(config.reportsDir, testId);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const filename = `page_${pageIndex}_${Date.now()}.png`;
-      await page.screenshot({
-        path: path.join(dir, filename),
-        fullPage: true,
-        timeout: 20000,
-      });
-      result.screenshotPath = path.join(dir, filename);
+      const filename = `page_${pageIndex}_desktop.png`;
+      const filePath = path.join(dir, filename);
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 20000 });
+      result.desktopPath = filePath;
+      result.screenshotPath = filePath; // kept for AI (desktop) + backward compat
       result.screenshotUrl = `/api/screenshots/${testId}/${filename}`;
+      result.screenshots.desktop = {
+        url: result.screenshotUrl,
+        viewport: PROFILES.desktop.viewport,
+      };
     } catch (err) {
-      result.error = `screenshot failed: ${err.message}`;
+      result.error = `desktop screenshot failed: ${err.message}`;
+    }
+
+    // --- MOBILE screenshot (separate emulated context; non-fatal) ---
+    try {
+      const mobileShot = await captureViewport(browser, PROFILES.mobile, {
+        url,
+        testId,
+        pageIndex,
+        reportsDir: config.reportsDir,
+      });
+      result.mobilePath = mobileShot.path;
+      result.screenshots.mobile = { url: mobileShot.url, viewport: mobileShot.viewport };
+    } catch (err) {
+      // Desktop result stays valid even if the mobile shot fails.
     }
 
     return result;
