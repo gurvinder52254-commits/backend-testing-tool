@@ -155,6 +155,8 @@ async function startTest(req, res) {
                 loadTimeMs: result.loadTimeMs || 0,
                 httpStatus: result.httpStatus || 200,
                 screenshotUrl: result.screenshotUrl,
+                desktopScreenshotUrl: result.desktopScreenshotUrl || result.screenshotUrl,
+                mobileScreenshotUrl: result.mobileScreenshotUrl || '',
                 consoleErrors: result.consoleErrors || [],
                 networkErrors: result.networkErrors || [],
                 elementsInfo: result.elementsInfo || {},

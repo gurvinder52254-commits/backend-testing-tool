@@ -7,7 +7,14 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "install-playwright": "npx playwright install chromium",
-    "analyze": "npx playwright test tests/page-analyzer.spec.ts --headed --project=chromium"
+    "analyze": "npx playwright test tests/page-analyzer.spec.ts --headed --project=chromium",
+    "ms:migrate": "node microservices/shared/migrate.js",
+    "ms:all": "node microservices/start-all.js",
+    "ms:gateway": "node microservices/gateway/index.js",
+    "ms:orchestrator": "node microservices/orchestrator/index.js",
+    "ms:worker": "node microservices/worker/index.js",
+    "ms:ai": "node microservices/ai-service/index.js",
+    "ms:realtime": "node microservices/realtime/index.js"
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
@@ -21,6 +28,7 @@
     "node-fetch": "^2.7.0",
     "ollama": "^0.6.3",
     "pg": "^8.22.0",
+    "pg-boss": "^12.25.0",
     "playwright": "^1.40.0",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",

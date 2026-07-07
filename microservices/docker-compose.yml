@@ -1,0 +1,94 @@
+# ============================================================
+# docker-compose.yml — optional local infra + services
+# ============================================================
+# This project runs WITHOUT Docker (it uses your existing local
+# Postgres). This file is provided for a fully containerized run
+# and as documentation of the deployment topology.
+#
+# Postgres here is OPTIONAL — if you already run Postgres locally,
+# skip the `postgres` service and point DATABASE_URL at it.
+#
+# Usage:
+#   docker compose -f microservices/docker-compose.yml up --build
+# ============================================================
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: webtest
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One image, five commands. In real prod each is its own deployment
+  # with independent replica counts (worker + ai scale highest).
+  ai-service:
+    build: ..
+    command: node microservices/ai-service/index.js
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/webtest
+      MS_AI_ENABLED: "false"      # set "true" + provide keys to enable paid AI
+      MS_AI_PORT: "4002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["4002:4002"]
+
+  orchestrator:
+    build: ..
+    command: node microservices/orchestrator/index.js
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/webtest
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: ..
+    command: node microservices/worker/index.js
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/webtest
+      MS_AI_URL: http://ai-service:4002
+      MS_PAGE_CONCURRENCY: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      replicas: 1   # bump this to scale page throughput horizontally
+
+  realtime:
+    build: ..
+    command: node microservices/realtime/index.js
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/webtest
+      MS_REALTIME_PORT: "4001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["4001:4001"]
+
+  gateway:
+    build: ..
+    command: node microservices/gateway/index.js
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/webtest
+      MS_GATEWAY_PORT: "4000"
+      MS_REALTIME_PORT: "4001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["4000:4000"]
+
+volumes:
+  pgdata:

@@ -3109,6 +3109,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 httpStatus: 0,
                 screenshotPath: '',
                 screenshotUrl: '',
+                mobileScreenshotUrl: '',
+                desktopScreenshotUrl: '',
                 consoleErrors: [],
                 networkErrors: [],
                 networkLog: {
@@ -3833,7 +3835,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     pageResult.brokenLinksCheck = [];
                 }
 
-                // Take full-page screenshot
+                // Take full-page DESKTOP screenshot
                 const screenshotName = `page_${pageIndex}_${Date.now()}.png`;
                 const screenshotPath = path.join(testDir, screenshotName);
                 await page.screenshot({
@@ -3842,6 +3844,43 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 });
                 pageResult.screenshotPath = screenshotPath;
                 pageResult.screenshotUrl = `/api/screenshots/${testId}/${screenshotName}`;
+                pageResult.desktopScreenshotUrl = pageResult.screenshotUrl;
+
+                // Take full-page MOBILE screenshot (separate emulated context; non-fatal)
+                try {
+                    const mobileContext = await browser.newContext({
+                        viewport: { width: 390, height: 844 },
+                        deviceScaleFactor: 3,
+                        isMobile: true,
+                        hasTouch: true,
+                        userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                        ignoreHTTPSErrors: true,
+                    });
+                    const mobilePage = await mobileContext.newPage();
+                    try {
+                        await mobilePage.goto(pageInfo.href, { waitUntil: 'load', timeout: 35000 })
+                            .catch(() => mobilePage.goto(pageInfo.href, { waitUntil: 'domcontentloaded', timeout: 20000 }));
+                        // gentle scroll so lazy content/images load on mobile too
+                        await mobilePage.evaluate(async () => {
+                            await new Promise((resolve) => {
+                                let y = 0;
+                                const t = setInterval(() => {
+                                    window.scrollBy(0, 600); y += 600;
+                                    if (y >= document.body.scrollHeight || y > 12000) { clearInterval(t); resolve(); }
+                                }, 100);
+                            });
+                        }).catch(() => {});
+                        await mobilePage.waitForTimeout(400);
+                        const mobileName = `page_${pageIndex}_mobile_${Date.now()}.png`;
+                        await mobilePage.screenshot({ path: path.join(testDir, mobileName), fullPage: true, timeout: 20000 });
+                        pageResult.mobileScreenshotUrl = `/api/screenshots/${testId}/${mobileName}`;
+                    } finally {
+                        await mobilePage.close().catch(() => {});
+                        await mobileContext.close().catch(() => {});
+                    }
+                } catch (mobileErr) {
+                    console.log(`   ⚠️ [Page ${pageIndex + 1}] Mobile screenshot failed:`, mobileErr.message);
+                }
 
                 sendUpdate({
                     type: 'ai-analyzing',
@@ -3938,6 +3977,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     loadStatus: pageResult.loadStatus,
                     score: pageResult.aiAnalysis?.overallScore || 0,
                     screenshotUrl: pageResult.screenshotUrl,
+                    desktopScreenshotUrl: pageResult.desktopScreenshotUrl,
+                    mobileScreenshotUrl: pageResult.mobileScreenshotUrl,
                     elementsInfo: pageResult.elementsInfo,
                     consoleErrors: pageResult.consoleErrors,
                     networkErrors: pageResult.networkErrors,
@@ -4017,6 +4058,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     loadTimeMs: p.loadTimeMs,
                     httpStatus: p.httpStatus,
                     screenshotUrl: p.screenshotUrl,
+                    mobileScreenshotUrl: p.mobileScreenshotUrl,
+                    desktopScreenshotUrl: p.desktopScreenshotUrl,
                     consoleErrors: p.consoleErrors,
                     networkErrors: p.networkErrors,
                     elementsInfo: p.elementsInfo,
