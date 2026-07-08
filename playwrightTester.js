@@ -2622,6 +2622,7 @@ const { runGroqAnalysisPipeline } = require('./groqAnalyzer');
 const { executeGroqTests } = require('./groqTestRunner');
 const fetch = require('node-fetch');
 const LinkCache = require('./models/LinkCache');
+const { captureFullPage } = require('./utils/fullPageCapture');
 
 const REPORTS_DIR = path.join(__dirname, 'reports');
 if (!fs.existsSync(REPORTS_DIR)) {
@@ -3835,13 +3836,11 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     pageResult.brokenLinksCheck = [];
                 }
 
-                // Take full-page DESKTOP screenshot
+                // Take full-page DESKTOP screenshot (stitched viewport-by-viewport
+                // so lazy/scroll-animated sections are never left blank)
                 const screenshotName = `page_${pageIndex}_${Date.now()}.png`;
                 const screenshotPath = path.join(testDir, screenshotName);
-                await page.screenshot({
-                    path: screenshotPath,
-                    fullPage: true,
-                });
+                await captureFullPage(page, screenshotPath);
                 pageResult.screenshotPath = screenshotPath;
                 pageResult.screenshotUrl = `/api/screenshots/${testId}/${screenshotName}`;
                 pageResult.desktopScreenshotUrl = pageResult.screenshotUrl;
@@ -3872,7 +3871,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                         }).catch(() => {});
                         await mobilePage.waitForTimeout(400);
                         const mobileName = `page_${pageIndex}_mobile_${Date.now()}.png`;
-                        await mobilePage.screenshot({ path: path.join(testDir, mobileName), fullPage: true, timeout: 20000 });
+                        await captureFullPage(mobilePage, path.join(testDir, mobileName));
                         pageResult.mobileScreenshotUrl = `/api/screenshots/${testId}/${mobileName}`;
                     } finally {
                         await mobilePage.close().catch(() => {});
