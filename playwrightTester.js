@@ -2630,6 +2630,66 @@ if (!fs.existsSync(REPORTS_DIR)) {
 }
 
 /**
+ * Turn a raw Playwright/Chromium navigation error into a clear, actionable
+ * message instead of a cryptic net::ERR_* dump.
+ */
+function friendlyNavError(err, url) {
+    const msg = (err && err.message) || String(err);
+    if (msg.includes('ERR_NAME_NOT_RESOLVED')) {
+        return `Could not reach "${url}" — the domain name could not be resolved (DNS lookup failed). Check that the URL is spelled correctly and that the site and your internet/DNS connection are working, then try again.`;
+    }
+    if (msg.includes('ERR_INTERNET_DISCONNECTED')) {
+        return `No internet connection while trying to reach "${url}". Reconnect and try again.`;
+    }
+    if (msg.includes('ERR_CONNECTION_REFUSED')) {
+        return `Connection refused by "${url}". The server may be down or blocking automated requests.`;
+    }
+    if (msg.includes('ERR_CONNECTION_TIMED_OUT') || msg.includes('ERR_TIMED_OUT') || /timeout|exceeded/i.test(msg)) {
+        return `Timed out trying to reach "${url}". The site may be slow, down, or unreachable from this network.`;
+    }
+    if (msg.includes('ERR_CERT') || msg.includes('SSL')) {
+        return `SSL/certificate problem while reaching "${url}".`;
+    }
+    if (msg.includes('ERR_ABORTED')) {
+        return `Navigation to "${url}" was aborted (the page may have blocked automation or redirected unexpectedly).`;
+    }
+    return `Could not load "${url}": ${msg.split('\n')[0]}`;
+}
+
+/**
+ * Navigate to a URL with a retry + 'load' → 'domcontentloaded' fallback.
+ * Throws a friendly error only after all attempts fail.
+ */
+async function gotoWithRetry(page, url, sendUpdate, attempts = 3) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            try {
+                return await page.goto(url, { waitUntil: 'load', timeout: 45000 });
+            } catch (err) {
+                if (page.isClosed()) throw err;
+                return await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            }
+        } catch (err) {
+            lastErr = err;
+            if (page.isClosed()) break;
+            if (attempt < attempts) {
+                const waitMs = attempt * 3000;
+                try {
+                    sendUpdate && sendUpdate({
+                        type: 'status',
+                        message: `⚠️ Could not reach ${url} (attempt ${attempt}/${attempts}). Retrying in ${waitMs / 1000}s...`,
+                        step: 'nav-retry',
+                    });
+                } catch (_) {}
+                await page.waitForTimeout(waitMs);
+            }
+        }
+    }
+    throw new Error(friendlyNavError(lastErr, url));
+}
+
+/**
  * Main multi-page website test
  * @param {string} testId - Unique test identifier
  * @param {string} frontendUrl - Frontend domain to test
@@ -2719,22 +2779,9 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
         });
 
         const loadStart = Date.now();
-        let response;
-        try {
-            response = await page.goto(frontendUrl, {
-                waitUntil: 'load',
-                timeout: 45000,
-            });
-        } catch (err) {
-            if (page.isClosed()) {
-                throw err;
-            }
-            console.log(`⚠️ Initial load with 'load' failed, trying 'domcontentloaded'...`);
-            response = await page.goto(frontendUrl, {
-                waitUntil: 'domcontentloaded',
-                timeout: 30000,
-            });
-        }
+        // Navigate with retry + fallback; throws a clear, friendly error if the
+        // site is unreachable (bad URL, DNS failure, no internet, timeout, etc.)
+        const response = await gotoWithRetry(page, frontendUrl, sendUpdate);
         await page.waitForTimeout(2000);
 
         // Scroll the page to the bottom (or simulate scrolling)
