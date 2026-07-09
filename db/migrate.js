@@ -146,6 +146,16 @@ async function runMigrations() {
     await client.query(`
       ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS confidence_score VARCHAR(50);
     `);
+    // Structured test-case fields (issue / expected / actual / reproduction)
+    await client.query(`
+      ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS expected_behavior TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS actual_behavior TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS reproduction_steps TEXT;
+    `);
 
     client.release();
 

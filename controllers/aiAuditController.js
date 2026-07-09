@@ -78,6 +78,19 @@ function extractJson(raw) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
+// ── Field normalizers (shared by audit + seeding) ─────────────
+function normalizeSeverity(s) {
+  return ['Critical', 'High', 'Medium', 'Low'].includes(s) ? s : 'Medium';
+}
+function normalizeCategory(c) {
+  if (!c) return 'UI/UX';
+  return String(c).replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
+}
+function formatSteps(steps) {
+  if (Array.isArray(steps)) return steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  return steps ? String(steps) : '';
+}
+
 // ── Screenshot helper ─────────────────────────────────────────
 async function takeScreenshot(pageUrl, outputPath) {
   let browser = null;
@@ -194,38 +207,28 @@ async function runAiAudit(req, res) {
       [testId, userId, url]
     );
 
-    // Insert consolidated issue
+    // Insert ONE task per detected issue, with structured test-case fields.
     const inserted = [];
-    if (issues.length > 0) {
-      const highestSeverity = issues.some(i => i.severity === 'Critical') ? 'Critical' :
-                              (issues.some(i => i.severity === 'High') ? 'High' :
-                              (issues.some(i => i.severity === 'Medium') ? 'Medium' : 'Low'));
-
-      let consolidatedTitle = "Complete Page Quality & UI/UX Audit";
-      let consolidatedDesc = "";
-      let consolidatedFix = "";
-
-      if (issues.length === 1 && (issues[0].description || '').includes('-')) {
-        consolidatedTitle = issues[0].title || consolidatedTitle;
-        consolidatedDesc = issues[0].description;
-        consolidatedFix = issues[0].recommendedFix || issues[0].recommended_fix || "";
-      } else {
-        consolidatedDesc = issues.map(item => `- ${item.title}: ${item.description}`).join('\n');
-        consolidatedFix = issues.map(item => `- ${item.title}: ${item.recommendedFix || item.recommended_fix || ''}`).join('\n');
-      }
-
+    for (const issue of issues) {
       const dbRes = await pool.query(
         `INSERT INTO ai_issues
-           (test_id, user_id, page_url, title, description, recommended_fix, priority, status, category, affected_element, confidence_score, ai_raw_response)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'open','UI/UX','Entire Page','95%',$8)
+           (test_id, user_id, page_url, title, description, recommended_fix, priority, status,
+            category, affected_element, confidence_score, expected_behavior, actual_behavior, reproduction_steps, ai_raw_response)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,$9,$10,$11,$12,$13,$14)
          RETURNING *`,
         [
           testId, userId, url,
-          consolidatedTitle,
-          consolidatedDesc,
-          consolidatedFix,
-          highestSeverity,
-          JSON.stringify(issues),
+          String(issue.title || 'UI Issue').slice(0, 250),
+          issue.description || '',
+          issue.recommendedFix || issue.recommended_fix || '',
+          normalizeSeverity(issue.severity),
+          normalizeCategory(issue.category),
+          issue.affectedElement || issue.affected_element || 'Page element',
+          String(issue.confidenceScore || issue.confidence_score || '90%'),
+          issue.expectedBehavior || issue.expected_behavior || '',
+          issue.actualBehavior || issue.actual_behavior || '',
+          formatSteps(issue.reproductionSteps || issue.reproduction_steps),
+          JSON.stringify(issue),
         ]
       );
       inserted.push(dbRes.rows[0]);
@@ -269,22 +272,26 @@ async function getAiIssues(req, res) {
         for (const page of pages) {
           if (!page.groqAnalysis) continue;
 
-          // Case A: Step 4 auditResult issues
+          // Case A: Step 4 auditResult issues (new structured test-case schema)
           if (page.groqAnalysis.auditResult && Array.isArray(page.groqAnalysis.auditResult.issues)) {
             for (const issue of page.groqAnalysis.auditResult.issues) {
               toInsert.push({
                 title: issue.title,
                 description: issue.description,
                 recommended_fix: issue.recommendedFix || issue.recommended_fix || 'Fix this visual or rendering issue.',
-                priority: ['Critical', 'High', 'Medium', 'Low'].includes(issue.severity) ? issue.severity : 'Medium',
-                category: issue.category || 'UI',
+                priority: normalizeSeverity(issue.severity),
+                category: normalizeCategory(issue.category),
                 affected_element: issue.affectedElement || issue.affected_element || 'Page element',
                 confidence_score: String(issue.confidenceScore || issue.confidence_score || '90%'),
+                expected_behavior: issue.expectedBehavior || issue.expected_behavior || '',
+                actual_behavior: issue.actualBehavior || issue.actual_behavior || '',
+                reproduction_steps: formatSteps(issue.reproductionSteps || issue.reproduction_steps),
+                raw: issue,
                 page_url: page.url
               });
             }
-          } 
-          // Case B: Fallback to elementAnalysis errors (like in the screenshot!)
+          }
+          // Case B: Fallback to elementAnalysis errors
           else if (page.groqAnalysis.elementAnalysis && Array.isArray(page.groqAnalysis.elementAnalysis.errors)) {
             for (const err of page.groqAnalysis.elementAnalysis.errors) {
               const priority = err.severity === 'high' ? 'High' : (err.severity === 'medium' ? 'Medium' : (err.severity === 'low' ? 'Low' : 'Medium'));
@@ -297,43 +304,39 @@ async function getAiIssues(req, res) {
                 category,
                 affected_element: 'Visual Element',
                 confidence_score: '95%',
+                expected_behavior: '',
+                actual_behavior: err.description || '',
+                reproduction_steps: '',
+                raw: err,
                 page_url: page.url
               });
             }
           }
         }
 
-        // Insert extracted consolidated issues grouped by page_url
+        // Insert extracted issues as individual task rows (one per issue)
         if (toInsert.length > 0) {
-          // Group toInsert items by page_url
-          const byPage = {};
+          console.log(`🤖 [getAiIssues] Seeding ${toInsert.length} fallback issue task(s) from report_data...`);
           for (const item of toInsert) {
-            if (!byPage[item.page_url]) byPage[item.page_url] = [];
-            byPage[item.page_url].push(item);
-          }
-
-          console.log(`🤖 [getAiIssues] Seeding consolidated fallback issues from report_data...`);
-          for (const [pageUrl, pageItems] of Object.entries(byPage)) {
-            const highestSeverity = pageItems.some(i => i.priority === 'Critical') ? 'Critical' :
-                                    (pageItems.some(i => i.priority === 'High') ? 'High' :
-                                    (pageItems.some(i => i.priority === 'Medium') ? 'Medium' : 'Low'));
-
-            const consolidatedTitle = "Complete Page Quality & UI/UX Audit";
-            const consolidatedDesc = pageItems.map(item => `- ${item.title}`).join('\n');
-            const consolidatedFix = pageItems.map(item => `- ${item.recommended_fix}`).join('\n');
-
             await pool.query(
               `INSERT INTO ai_issues
-                 (test_id, user_id, page_url, title, description, recommended_fix, priority, status, category, affected_element, confidence_score, ai_raw_response)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,'open','UI/UX','Entire Page','95%',$8)
+                 (test_id, user_id, page_url, title, description, recommended_fix, priority, status,
+                  category, affected_element, confidence_score, expected_behavior, actual_behavior, reproduction_steps, ai_raw_response)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,$9,$10,$11,$12,$13,$14)
                ON CONFLICT DO NOTHING`,
               [
-                testId, userId, pageUrl,
-                consolidatedTitle,
-                consolidatedDesc,
-                consolidatedFix,
-                highestSeverity,
-                JSON.stringify(pageItems)
+                testId, userId, item.page_url,
+                String(item.title || 'UI Issue').slice(0, 250),
+                item.description || '',
+                item.recommended_fix || '',
+                item.priority,
+                item.category,
+                item.affected_element,
+                item.confidence_score,
+                item.expected_behavior,
+                item.actual_behavior,
+                item.reproduction_steps,
+                JSON.stringify(item.raw || item),
               ]
             );
           }

@@ -504,7 +504,60 @@ async function runGroqAnalysisPipeline(screenshotPath, pageUrl, pageTitle, userD
 }
 
 /**
- * STEP 4 Helper: Comprehensive page audit using Groq Vision
+ * Normalized dedupe key for an audit issue (category + first ~60 chars of title).
+ */
+function auditIssueKey(issue) {
+    const t = String(issue.title || issue.description || '')
+        .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 60);
+    const c = String(issue.category || '').toLowerCase();
+    return `${c}::${t}`;
+}
+
+/**
+ * Merge two independent audit passes on the SAME screenshot.
+ * Union of issues (nothing missed) + dedupe. Issues found in BOTH passes are
+ * marked verifiedInBothPasses (higher confidence).
+ */
+function mergeAuditIssues(passA, passB) {
+    const map = new Map();
+    const add = (issue, passNo) => {
+        if (!issue || (!issue.title && !issue.description)) return;
+        const key = auditIssueKey(issue);
+        if (map.has(key)) {
+            map.get(key)._passes.add(passNo);
+        } else {
+            map.set(key, { ...issue, _passes: new Set([passNo]) });
+        }
+    };
+    (Array.isArray(passA) ? passA : []).forEach((i) => add(i, 1));
+    (Array.isArray(passB) ? passB : []).forEach((i) => add(i, 2));
+
+    const sev = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+    return Array.from(map.values())
+        .map((issue) => {
+            const confirmed = issue._passes.size >= 2;
+            const { _passes, ...rest } = issue;
+            const steps = Array.isArray(rest.reproductionSteps)
+                ? rest.reproductionSteps
+                : (rest.reproductionSteps ? [String(rest.reproductionSteps)] : []);
+            return {
+                ...rest,
+                reproductionSteps: steps,
+                verifiedInBothPasses: confirmed,
+                confidenceScore: confirmed ? '95%' : (rest.confidenceScore || '80%'),
+            };
+        })
+        .sort((x, y) => {
+            if (x.verifiedInBothPasses !== y.verifiedInBothPasses) return x.verifiedInBothPasses ? -1 : 1;
+            return (sev[x.severity] ?? 2) - (sev[y.severity] ?? 2);
+        });
+}
+
+/**
+ * STEP 4 Helper: Comprehensive page audit using Groq Vision.
+ * Sends the SAME screenshot to the model in TWO identical requests
+ * (cross-verification) and merges the results into structured UI test cases,
+ * each with expected behavior, actual behavior, and reproduction steps.
  */
 async function auditPageIssues(screenshotPath, pageUrl, pageTitle) {
     if (!isInitialized && !initializeGroq()) {
@@ -515,42 +568,75 @@ async function auditPageIssues(screenshotPath, pageUrl, pageTitle) {
         const imageBuffer = fs.readFileSync(screenshotPath);
         const base64Image = imageBuffer.toString('base64');
 
-        const systemPrompt = `You are a professional website auditor, UX designer, and QA specialist.
-Perform a complete webpage audit based on the provided screenshot.
-You must run all of the following checks automatically:
-1. UI/UX: Overall UI/UX consistency, design quality, visual hierarchy, consistency in icons/images/fonts/colors/branding.
-2. Grammar & Copy: Spelling, grammar, punctuation, and keyword-related mistakes.
-3. Design & Structure: Missing page design elements, layout, structure, outline, and visual hierarchy.
-4. Visual Layout & Rendering: Text overlap, content alignment, spacing, padding, margin, overflow, clipping, z-index issues.
-5. Navigation: Header and footer design, alignment, navigation completeness, and responsiveness.
-6. Buttons & Interactive Elements: Button design, color consistency, size, spacing, typography, hover/focus states, and styling.
-7. Inputs & Forms: Form structure, input fields, dropdowns, checkboxes, radio buttons, and validation UI feedback.
-8. Accessibility: Contrast, missing alt text, labels, and keyboard navigation indicators.
-9. Rendering Performance: Visible rendering lags, layout shifts, or unoptimized images.
+        const systemPrompt = `You are a professional website QA engineer, UX designer, and accessibility auditor.
+Analyze the provided webpage screenshot and produce a list of concrete UI/UX TEST CASES (issues).
+Run all of these checks:
+1. UI/UX consistency, visual hierarchy, branding, icon/font/color consistency.
+2. Grammar, spelling, punctuation, copy quality, keyword stuffing.
+3. Design & structure: missing/incomplete sections, placeholder content, outline.
+4. Layout & rendering: text overlap, misalignment, spacing/padding, overflow, clipping, z-index.
+5. Header/footer & navigation: completeness, alignment, logo placement.
+6. Buttons & interactive elements: MISSING or BLANK buttons/labels, inconsistent styles/sizes/colors, missing states.
+7. Inputs & forms: structure, fields, validation UI feedback.
+8. Accessibility: contrast, alt text, labels, focus indicators.
+9. Rendering performance: layout shift, unoptimized/blank images.
 
-Generate exactly ONE consolidated issue task object for the entire page listing all findings as bullet points.
-Return ONLY valid JSON in this format (no markdown code blocks, no extra text):
+Return ONLY valid JSON (no markdown, no extra text) in EXACTLY this shape:
 {
-    "issues": [
-        {
-            "title": "Complete Page Quality & UI/UX Audit",
-            "severity": "Critical|High|Medium|Low",
-            "category": "UI/UX",
-            "affectedElement": "Entire Page",
-            "description": "- List point 1\\n- List point 2\\n- List point 3",
-            "screenshotLocation": "Page-wide",
-            "recommendedFix": "- Fix step 1\\n- Fix step 2",
-            "confidenceScore": "95%"
+  "issues": [
+    {
+      "title": "Short issue title (max 80 chars)",
+      "category": "ui_ux|layout|grammar|rendering|design|buttons|header_footer|accessibility|forms",
+      "severity": "Critical|High|Medium|Low",
+      "affectedElement": "Specific element/section affected (e.g. 'Hero secondary CTA button')",
+      "description": "What is wrong and why it is a problem",
+      "expectedBehavior": "What the correct/expected UI or behavior should be",
+      "actualBehavior": "What is actually observed in this screenshot",
+      "reproductionSteps": ["Open the page", "Look at ...", "Observe ..."],
+      "recommendedFix": "Specific, actionable fix",
+      "confidenceScore": "0-100%"
+    }
+  ]
+}
+
+Rules:
+- Report ONLY real issues visible in the screenshot. Do not invent issues. If a category is fine, omit it.
+- Be specific: reference actual text, colors, positions, and elements you can see.
+- severity: Critical=broken/unusable, High=significant, Medium=notable, Low=minor.
+- reproductionSteps must be concrete and start from opening the page.`;
+
+        const userPrompt = `Audit this webpage screenshot: "${pageUrl}" (Title: "${pageTitle}"). Return the JSON test-case list.`;
+        const prompt = systemPrompt + "\n\n" + userPrompt;
+
+        const parsePass = (settled) => {
+            if (settled.status !== 'fulfilled' || !settled.value) return [];
+            try {
+                const parsed = JSON.parse(sanitizeJsonString(settled.value));
+                if (Array.isArray(parsed)) return parsed;
+                return Array.isArray(parsed.issues) ? parsed.issues : [];
+            } catch {
+                return [];
+            }
+        };
+
+        // Send the SAME image in two identical requests for cross-verification.
+        const [rA, rB] = await Promise.allSettled([
+            callGroqVision(base64Image, prompt, 6000),
+            callGroqVision(base64Image, prompt, 6000),
+        ]);
+
+        const issuesA = parsePass(rA);
+        const issuesB = parsePass(rB);
+
+        if (issuesA.length === 0 && issuesB.length === 0) {
+            if (rA.status === 'rejected' && rB.status === 'rejected') {
+                return { success: false, error: rA.reason?.message || rB.reason?.message || 'AI audit failed', issues: [] };
+            }
+            return { success: true, issues: [], passes: { a: 0, b: 0 } };
         }
-    ]
-}`;
 
-        const userPrompt = `Audit this webpage screenshot: "${pageUrl}" (Title: "${pageTitle}"). Run all checks, consolidate them into exactly one task list, and output the JSON.`;
-
-        const responseText = await callGroqVision(base64Image, systemPrompt + "\n\n" + userPrompt, 6000);
-        const cleanJson = sanitizeJsonString(responseText);
-        const parsed = JSON.parse(cleanJson);
-        return { success: true, issues: parsed.issues || [] };
+        const merged = mergeAuditIssues(issuesA, issuesB);
+        return { success: true, issues: merged, passes: { a: issuesA.length, b: issuesB.length } };
     } catch (error) {
         console.error(`❌ Groq page audit error for ${pageUrl}:`, error.message);
         return { success: false, error: error.message, issues: [] };
