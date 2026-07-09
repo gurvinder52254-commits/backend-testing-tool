@@ -470,6 +470,29 @@ async function runGroqAnalysisPipeline(screenshotPath, pageUrl, pageTitle, userD
             });
         }
 
+        // Add small delay to prevent rapid token usage
+        await sleep(2000);
+
+        // STEP 4: Comprehensive AI Audit (new requirement)
+        if (sendUpdate) {
+            sendUpdate({
+                type: 'groq-status',
+                step: 'ai-audit',
+                message: `🤖 Groq AI performing complete page audit for ${pageUrl}...`,
+            });
+        }
+
+        result.auditResult = await auditPageIssues(screenshotPath, pageUrl, pageTitle);
+
+        if (sendUpdate) {
+            sendUpdate({
+                type: 'groq-audit-complete',
+                url: pageUrl,
+                audit: result.auditResult,
+                message: `✅ AI page audit complete: found ${result.auditResult?.issues?.length || 0} issues`,
+            });
+        }
+
         result.status = 'complete';
     } catch (error) {
         result.status = 'error';
@@ -478,6 +501,60 @@ async function runGroqAnalysisPipeline(screenshotPath, pageUrl, pageTitle, userD
     }
 
     return result;
+}
+
+/**
+ * STEP 4 Helper: Comprehensive page audit using Groq Vision
+ */
+async function auditPageIssues(screenshotPath, pageUrl, pageTitle) {
+    if (!isInitialized && !initializeGroq()) {
+        return { success: false, error: 'Groq API key not configured', issues: [] };
+    }
+
+    try {
+        const imageBuffer = fs.readFileSync(screenshotPath);
+        const base64Image = imageBuffer.toString('base64');
+
+        const systemPrompt = `You are a professional website auditor, UX designer, and QA specialist.
+Perform a complete webpage audit based on the provided screenshot.
+You must run all of the following checks automatically:
+1. UI/UX: Overall UI/UX consistency, design quality, visual hierarchy, consistency in icons/images/fonts/colors/branding.
+2. Grammar & Copy: Spelling, grammar, punctuation, and keyword-related mistakes.
+3. Design & Structure: Missing page design elements, layout, structure, outline, and visual hierarchy.
+4. Visual Layout & Rendering: Text overlap, content alignment, spacing, padding, margin, overflow, clipping, z-index issues.
+5. Navigation: Header and footer design, alignment, navigation completeness, and responsiveness.
+6. Buttons & Interactive Elements: Button design, color consistency, size, spacing, typography, hover/focus states, and styling.
+7. Inputs & Forms: Form structure, input fields, dropdowns, checkboxes, radio buttons, and validation UI feedback.
+8. Accessibility: Contrast, missing alt text, labels, and keyboard navigation indicators.
+9. Rendering Performance: Visible rendering lags, layout shifts, or unoptimized images.
+
+Generate exactly ONE consolidated issue task object for the entire page listing all findings as bullet points.
+Return ONLY valid JSON in this format (no markdown code blocks, no extra text):
+{
+    "issues": [
+        {
+            "title": "Complete Page Quality & UI/UX Audit",
+            "severity": "Critical|High|Medium|Low",
+            "category": "UI/UX",
+            "affectedElement": "Entire Page",
+            "description": "- List point 1\\n- List point 2\\n- List point 3",
+            "screenshotLocation": "Page-wide",
+            "recommendedFix": "- Fix step 1\\n- Fix step 2",
+            "confidenceScore": "95%"
+        }
+    ]
+}`;
+
+        const userPrompt = `Audit this webpage screenshot: "${pageUrl}" (Title: "${pageTitle}"). Run all checks, consolidate them into exactly one task list, and output the JSON.`;
+
+        const responseText = await callGroqVision(base64Image, systemPrompt + "\n\n" + userPrompt, 6000);
+        const cleanJson = sanitizeJsonString(responseText);
+        const parsed = JSON.parse(cleanJson);
+        return { success: true, issues: parsed.issues || [] };
+    } catch (error) {
+        console.error(`❌ Groq page audit error for ${pageUrl}:`, error.message);
+        return { success: false, error: error.message, issues: [] };
+    }
 }
 
 /**
@@ -527,4 +604,5 @@ module.exports = {
     suggestTestCases,
     generatePlaywrightCode,
     runGroqAnalysisPipeline,
+    auditPageIssues,
 };

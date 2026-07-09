@@ -34,6 +34,7 @@ const scanStore = require('../shared/scanStore');
 const { verifyGoogleToken, generateSessionToken } = require('../../middleware/authMiddleware');
 const controller = require('../../controllers/reportController');
 const Report = require('../../models/Report');
+const aiAudit = require('../../controllers/aiAuditController');
 
 const log = createLogger('gateway');
 
@@ -64,7 +65,7 @@ function broadcastUpdate(data) {
 app.set('broadcastUpdate', broadcastUpdate);
 
 // ---- middleware ----
-app.use(cors({ origin: process.env.MS_CORS_ORIGIN || '*', methods: ['GET', 'POST'] }));
+app.use(cors({ origin: process.env.MS_CORS_ORIGIN || '*', methods: ['GET', 'POST', 'PATCH'] }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -149,6 +150,12 @@ app.get('/api/reports/:testId/pages', verifyGoogleToken, controller.getReportPag
 app.get('/api/reports/:testId', verifyGoogleToken, controller.getReport);
 app.post('/api/test', controller.testLegacy);
 app.post('/api/groq-analyze', controller.groqAnalyze);
+
+// ── AI Audit routes — mirrored from monolith ──────────────────
+app.post('/api/ai-audit', verifyGoogleToken, aiAudit.runAiAudit);
+app.get('/api/ai-issues/:testId', verifyGoogleToken, aiAudit.getAiIssues);
+app.patch('/api/ai-issues/:issueId', verifyGoogleToken, aiAudit.updateIssueStatus);
+app.post('/api/ai-verify/:issueId', verifyGoogleToken, aiAudit.verifyIssue);
 
 app.get('/', (req, res) =>
   res.json({ message: '🚀 Website Testing Platform API v2.0 (microservices gateway)' })

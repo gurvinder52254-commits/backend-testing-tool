@@ -114,7 +114,41 @@ async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_link_cache_domain ON link_status_cache(domain);
     `);
 
+    // 4. AI Issues Table — stores AI audit issues per scan report
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ai_issues (
+        id SERIAL PRIMARY KEY,
+        test_id VARCHAR(50) NOT NULL,
+        user_id VARCHAR(255) NOT NULL,
+        page_url TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        recommended_fix TEXT,
+        priority VARCHAR(20) DEFAULT 'Medium',
+        status VARCHAR(30) DEFAULT 'open',
+        category VARCHAR(50),
+        ai_raw_response JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_ai_issues_test ON ai_issues(test_id);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_ai_issues_user ON ai_issues(user_id);
+    `);
+
+    // Ensure columns for new requirements exist
+    await client.query(`
+      ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS affected_element TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS confidence_score VARCHAR(50);
+    `);
+
     client.release();
+
     console.log('✅ DB Migration: Tables initialized successfully.');
     return true;
   } catch (err) {

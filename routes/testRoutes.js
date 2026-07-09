@@ -20,6 +20,13 @@ const {
   getScanStatus
 } = require('../controllers/reportController');
 
+const {
+  runAiAudit,
+  getAiIssues,
+  updateIssueStatus,
+  verifyIssue
+} = require('../controllers/aiAuditController');
+
 // REST API Endpoints
 router.get('/health', getHealth);
 router.get('/test/:testId', getLiveTestStatus);
@@ -53,4 +60,11 @@ router.get('/reports/:testId', verifyGoogleToken, getReport);
 router.post('/test', testLegacy);
 router.post('/groq-analyze', groqAnalyze);
 
+// ── AI Audit routes (new — modular, backward-compatible) ──────
+router.post('/ai-audit', verifyGoogleToken, runAiAudit);
+router.get('/ai-issues/:testId', verifyGoogleToken, getAiIssues);
+router.patch('/ai-issues/:issueId', verifyGoogleToken, updateIssueStatus);
+router.post('/ai-verify/:issueId', verifyGoogleToken, verifyIssue);
+
 module.exports = router;
+

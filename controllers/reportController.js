@@ -185,6 +185,55 @@ async function startTest(req, res) {
                 : 0;
 
               // Save incremental report to database
+              try {
+                if (result.groqAnalysis && result.groqAnalysis.auditResult && Array.isArray(result.groqAnalysis.auditResult.issues)) {
+                  const auditIssues = result.groqAnalysis.auditResult.issues;
+                  const { pool } = require('../config/db');
+                  console.log(`🤖 [reportController] Auto-saving ${auditIssues.length} AI issues for page ${result.url}...`);
+                  
+                  // Delete existing issues for this page in this test run to prevent duplication
+                  await pool.query(
+                    'DELETE FROM ai_issues WHERE test_id = $1 AND page_url = $2',
+                    [testId, result.url]
+                  );
+
+                  if (auditIssues.length > 0) {
+                    const highestSeverity = auditIssues.some(i => i.severity === 'Critical') ? 'Critical' :
+                                            (auditIssues.some(i => i.severity === 'High') ? 'High' :
+                                            (auditIssues.some(i => i.severity === 'Medium') ? 'Medium' : 'Low'));
+                    
+                    let consolidatedTitle = "Complete Page Quality & UI/UX Audit";
+                    let consolidatedDesc = "";
+                    let consolidatedFix = "";
+
+                    if (auditIssues.length === 1 && (auditIssues[0].description || '').includes('-')) {
+                      consolidatedTitle = auditIssues[0].title || consolidatedTitle;
+                      consolidatedDesc = auditIssues[0].description;
+                      consolidatedFix = auditIssues[0].recommendedFix || auditIssues[0].recommended_fix || "";
+                    } else {
+                      consolidatedDesc = auditIssues.map(item => `- ${item.title}: ${item.description}`).join('\n');
+                      consolidatedFix = auditIssues.map(item => `- ${item.title}: ${item.recommendedFix || item.recommended_fix || ''}`).join('\n');
+                    }
+
+                    await pool.query(
+                      `INSERT INTO ai_issues
+                         (test_id, user_id, page_url, title, description, recommended_fix, priority, status, category, affected_element, confidence_score, ai_raw_response)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,'open','UI/UX','Entire Page','95%',$8)`,
+                      [
+                        testId, userId, result.url,
+                        consolidatedTitle,
+                        consolidatedDesc,
+                        consolidatedFix,
+                        highestSeverity,
+                        JSON.stringify(auditIssues)
+                      ]
+                    );
+                  }
+                }
+              } catch (saveErr) {
+                console.error('⚠️ Failed to auto-save AI issues:', saveErr.message);
+              }
+
               await Report.upsertReport({
                 testId,
                 userId,
