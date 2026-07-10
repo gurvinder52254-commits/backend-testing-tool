@@ -3159,6 +3159,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                 screenshotUrl: '',
                 mobileScreenshotUrl: '',
                 desktopScreenshotUrl: '',
+                indexStatus: 'unknown',
+                robots: null,
                 consoleErrors: [],
                 networkErrors: [],
                 networkLog: {
@@ -3431,7 +3433,9 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                             hasMetaDescription: !!getMetaContent(['description']),
                             hasOgDescription: !!getMetaContent(['og:description']),
                             hasOgType: !!getMetaContent(['og:type']),
-                            hasViewport: !!document.querySelector('meta[name="viewport" i]')
+                            hasViewport: !!document.querySelector('meta[name="viewport" i]'),
+                            metaRobots: getMetaContent(['robots']) || '',
+                            metaGooglebot: getMetaContent(['googlebot']) || ''
                         },
                         counts: {
                             images: images.length,
@@ -3450,6 +3454,27 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                         badImages,
                     };
                 });
+
+                // Indexability check: <meta name="robots|googlebot" content="noindex"> or X-Robots-Tag header
+                try {
+                    const xRobotsTag = (pageResponse && typeof pageResponse.headers === 'function')
+                        ? (pageResponse.headers()['x-robots-tag'] || '')
+                        : '';
+                    const metaRobots = String(pageResult.elementsInfo?.seo?.metaRobots || '').toLowerCase();
+                    const metaGooglebot = String(pageResult.elementsInfo?.seo?.metaGooglebot || '').toLowerCase();
+                    const isNoindex = /noindex/.test(metaRobots) || /noindex/.test(metaGooglebot) || /noindex/i.test(String(xRobotsTag));
+                    pageResult.indexStatus = isNoindex ? 'noindex' : 'indexed';
+                    pageResult.robots = {
+                        metaRobots: pageResult.elementsInfo?.seo?.metaRobots || '',
+                        metaGooglebot: pageResult.elementsInfo?.seo?.metaGooglebot || '',
+                        xRobotsTag: String(xRobotsTag || ''),
+                    };
+                    if (pageResult.elementsInfo && pageResult.elementsInfo.seo) {
+                        pageResult.elementsInfo.seo.indexable = !isNoindex;
+                    }
+                } catch (idxErr) {
+                    pageResult.indexStatus = 'unknown';
+                }
 
                 // Update global summary stats
                 report.globalSummary.elementStats.totalImages += pageResult.elementsInfo.counts.images;
@@ -4025,6 +4050,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     screenshotUrl: pageResult.screenshotUrl,
                     desktopScreenshotUrl: pageResult.desktopScreenshotUrl,
                     mobileScreenshotUrl: pageResult.mobileScreenshotUrl,
+                    indexStatus: pageResult.indexStatus,
+                    robots: pageResult.robots,
                     elementsInfo: pageResult.elementsInfo,
                     consoleErrors: pageResult.consoleErrors,
                     networkErrors: pageResult.networkErrors,
@@ -4106,6 +4133,8 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     screenshotUrl: p.screenshotUrl,
                     mobileScreenshotUrl: p.mobileScreenshotUrl,
                     desktopScreenshotUrl: p.desktopScreenshotUrl,
+                    indexStatus: p.indexStatus,
+                    robots: p.robots,
                     consoleErrors: p.consoleErrors,
                     networkErrors: p.networkErrors,
                     elementsInfo: p.elementsInfo,

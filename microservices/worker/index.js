@@ -99,6 +99,8 @@ async function handleScan(data) {
           screenshotUrl: result.screenshotUrl,
           desktopScreenshotUrl: result.desktopScreenshotUrl || result.screenshotUrl,
           mobileScreenshotUrl: result.mobileScreenshotUrl || '',
+          indexStatus: result.indexStatus || 'unknown',
+          robots: result.robots || null,
           consoleErrors: result.consoleErrors || [],
           networkErrors: result.networkErrors || [],
           elementsInfo: result.elementsInfo || {},
