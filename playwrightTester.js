@@ -3218,7 +3218,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
             // --- NETWORK LOG: Track all requests with timing ---
             const networkRequests = new Map();
             const requestHandler = (request) => {
-                networkRequests.set(request.url() + '_' + request.resourceType(), {
+                networkRequests.set(request, {
                     url: request.url(),
                     name: request.url().split('/').pop()?.split('?')[0] || request.url(),
                     method: request.method(),
@@ -3231,8 +3231,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
             };
 
             const responseLogHandler = async (response) => {
-                const key = response.url() + '_' + response.request().resourceType();
-                const entry = networkRequests.get(key);
+                const entry = networkRequests.get(response.request());
                 if (entry) {
                     entry.status = response.status();
                     entry.time = Date.now() - entry.startTime;
@@ -4137,6 +4136,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDet
                     robots: p.robots,
                     consoleErrors: p.consoleErrors,
                     networkErrors: p.networkErrors,
+                    networkLog: p.networkLog,
                     elementsInfo: p.elementsInfo,
                     brokenLinksCheck: p.brokenLinksCheck || [],
                     imageCheckResults: p.imageCheckResults || [],

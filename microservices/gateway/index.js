@@ -76,6 +76,12 @@ app.use('/api/screenshots', express.static(reportsDir));
 // ---- internal: worker → gateway event relay → WS broadcast ----
 // (localhost only; the worker posts every engine event here)
 app.post('/internal/broadcast', (req, res) => {
+  // ✅ SECURITY: Only allow requests from localhost/internal network
+  const ip = req.ip || (req.connection && req.connection.remoteAddress) || '';
+  const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  if (!isLocal) {
+    return res.status(403).json({ error: 'Forbidden: internal endpoint only' });
+  }
   broadcastUpdate(req.body || {});
   res.json({ ok: true });
 });
@@ -148,8 +154,8 @@ app.get('/api/scan-status/:jobId', verifyGoogleToken, controller.getScanStatus);
 app.get('/api/reports', verifyGoogleToken, controller.getReports);
 app.get('/api/reports/:testId/pages', verifyGoogleToken, controller.getReportPages);
 app.get('/api/reports/:testId', verifyGoogleToken, controller.getReport);
-app.post('/api/test', controller.testLegacy);
-app.post('/api/groq-analyze', controller.groqAnalyze);
+app.post('/api/test', verifyGoogleToken, controller.testLegacy);
+app.post('/api/groq-analyze', verifyGoogleToken, controller.groqAnalyze);
 
 // ── AI Audit routes — mirrored from monolith ──────────────────
 app.post('/api/ai-audit', verifyGoogleToken, aiAudit.runAiAudit);

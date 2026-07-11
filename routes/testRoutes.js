@@ -29,7 +29,7 @@ const {
 
 // REST API Endpoints
 router.get('/health', getHealth);
-router.get('/test/:testId', getLiveTestStatus);
+router.get('/test/:testId', verifyGoogleToken, getLiveTestStatus);
 router.post('/login', verifyGoogleToken, (req, res) => {
   const sessionToken = generateSessionToken({
     id: req.userId,
@@ -57,8 +57,8 @@ router.get('/reports/:testId/pages', verifyGoogleToken, getReportPages);
 router.get('/reports/:testId', verifyGoogleToken, getReport);
 
 // Legacy/Auxiliary routes
-router.post('/test', testLegacy);
-router.post('/groq-analyze', groqAnalyze);
+router.post('/test', verifyGoogleToken, testLegacy);
+router.post('/groq-analyze', verifyGoogleToken, groqAnalyze);
 
 // ── AI Audit routes (new — modular, backward-compatible) ──────
 router.post('/ai-audit', verifyGoogleToken, runAiAudit);

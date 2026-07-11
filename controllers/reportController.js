@@ -41,6 +41,11 @@ function getLiveTestStatus(req, res) {
     return res.status(404).json({ success: false, error: 'Test not found' });
   }
 
+  // ✅ SECURITY: Ensure the requesting user owns this test
+  if (test.userId && test.userId !== req.userId) {
+    return res.status(403).json({ success: false, error: 'Access denied. This test belongs to another user.' });
+  }
+
   res.json({ success: true, ...test });
 }
 
@@ -161,6 +166,8 @@ async function startTest(req, res) {
                 robots: result.robots || null,
                 consoleErrors: result.consoleErrors || [],
                 networkErrors: result.networkErrors || [],
+                // ✅ FIX: networkLog was missing — Network Activity was not showing in new scans
+                networkLog: result.networkLog || { requests: [], summary: { totalRequests: 0, totalSize: 0, totalTransferred: 0, domContentLoaded: 0, loadTime: 0, finishTime: 0 } },
                 elementsInfo: result.elementsInfo || {},
                 brokenLinksCheck: result.brokenLinksCheck || [],
                 imageCheckResults: result.imageCheckResults || [],
@@ -468,6 +475,10 @@ async function getReportPages(req, res) {
     }
     try {
       const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+      // ✅ SECURITY: Verify ownership even in filesystem fallback
+      if (report.userId && report.userId !== userId) {
+        return res.status(403).json({ success: false, error: 'Access denied. This report belongs to another user.' });
+      }
       const allPages = report.pages || [];
       const offset = (page - 1) * limit;
       return res.json({

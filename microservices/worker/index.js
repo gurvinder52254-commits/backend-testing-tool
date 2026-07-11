@@ -103,6 +103,8 @@ async function handleScan(data) {
           robots: result.robots || null,
           consoleErrors: result.consoleErrors || [],
           networkErrors: result.networkErrors || [],
+          // ✅ FIX: networkLog was missing — Network Activity was not showing in new scans
+          networkLog: result.networkLog || { requests: [], summary: { totalRequests: 0, totalSize: 0, totalTransferred: 0, domContentLoaded: 0, loadTime: 0, finishTime: 0 } },
           elementsInfo: result.elementsInfo || {},
           brokenLinksCheck: result.brokenLinksCheck || [],
           imageCheckResults: result.imageCheckResults || [],
