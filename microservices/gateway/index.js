@@ -163,6 +163,7 @@ app.get('/api/scan-status/:jobId', verifyGoogleToken, controller.getScanStatus);
 app.get('/api/reports', verifyGoogleToken, controller.getReports);
 app.get('/api/reports/:testId/pages', verifyGoogleToken, controller.getReportPages);
 app.get('/api/reports/:testId', verifyGoogleToken, controller.getReport);
+app.delete('/api/reports/:testId', verifyGoogleToken, controller.deleteReport);
 app.post('/api/test', verifyGoogleToken, controller.testLegacy);
 app.post('/api/groq-analyze', verifyGoogleToken, controller.groqAnalyze);
 

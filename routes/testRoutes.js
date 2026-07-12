@@ -17,7 +17,8 @@ const {
   testLegacy,
   groqAnalyze,
   scanDomain,
-  getScanStatus
+  getScanStatus,
+  deleteReport
 } = require('../controllers/reportController');
 
 const {
@@ -55,6 +56,7 @@ router.get('/scan-status/:jobId', verifyGoogleToken, getScanStatus);
 router.get('/reports', verifyGoogleToken, getReports);
 router.get('/reports/:testId/pages', verifyGoogleToken, getReportPages);
 router.get('/reports/:testId', verifyGoogleToken, getReport);
+router.delete('/reports/:testId', verifyGoogleToken, deleteReport);
 
 // Legacy/Auxiliary routes
 router.post('/test', verifyGoogleToken, testLegacy);

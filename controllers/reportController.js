@@ -746,6 +746,34 @@ async function getScanStatus(req, res) {
   }
 }
 
+async function deleteReport(req, res) {
+  const { testId } = req.params;
+  const userId = req.userId;
+
+  try {
+    // 1. Delete from ai_issues table
+    await pool.query('DELETE FROM ai_issues WHERE test_id = $1 AND user_id = $2', [testId, userId]);
+
+    // 2. Delete from reports table
+    const deleteRes = await pool.query('DELETE FROM reports WHERE test_id = $1 AND user_id = $2 RETURNING *', [testId, userId]);
+
+    // 3. Delete from filesystem if fallback files exist
+    const reportDir = path.join(__dirname, '..', 'reports', testId);
+    if (fs.existsSync(reportDir)) {
+      fs.rmSync(reportDir, { recursive: true, force: true });
+    }
+
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Report not found or access denied.' });
+    }
+
+    return res.json({ success: true, message: 'Report deleted successfully.' });
+  } catch (err) {
+    console.error('Error deleting report:', err.message);
+    res.status(500).json({ success: false, error: 'Server error: ' + err.message });
+  }
+}
+
 module.exports = {
   getHealth,
   getLiveTestStatus,
@@ -756,5 +784,6 @@ module.exports = {
   testLegacy,
   groqAnalyze,
   scanDomain,
-  getScanStatus
+  getScanStatus,
+  deleteReport
 };
