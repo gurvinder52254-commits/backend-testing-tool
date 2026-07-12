@@ -912,7 +912,7 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
                             metaRobots: getMetaContent(['robots']) || '',
                             metaGooglebot: getMetaContent(['googlebot']) || ''
                         },
-                        counts: {
+                         counts: {
                             images: images.length,
                             links: links.length,
                             h1: document.querySelectorAll('h1').length,
@@ -920,7 +920,9 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
                             duplicateImages: totalDuplicateImages,
                             duplicateLinks: totalDuplicateLinks,
                             missingSrc: exactMissingSrc,
-                            missingAlt: exactMissingAlt
+                            missingAlt: exactMissingAlt,
+                            scripts: document.querySelectorAll('script').length,
+                            styles: document.querySelectorAll('link[rel="stylesheet"]').length + document.querySelectorAll('style').length
                         },
                         broken: {
                             images: badImages.filter(img => img.isBroken || img.missingSrc),
