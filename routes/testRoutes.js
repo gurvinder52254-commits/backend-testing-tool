@@ -6,7 +6,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { verifyGoogleToken, generateSessionToken } = require('../middleware/authMiddleware');
+const { verifyGoogleToken, generateSessionToken, checkCredits } = require('../middleware/authMiddleware');
 const {
   getHealth,
   getLiveTestStatus,
@@ -49,7 +49,7 @@ router.post('/login', verifyGoogleToken, (req, res) => {
     }
   });
 });
-router.post('/start-test', verifyGoogleToken, startTest);
+router.post('/start-test', verifyGoogleToken, checkCredits, startTest);
 router.post('/scan-domain', verifyGoogleToken, scanDomain);
 router.get('/scan-status/:jobId', verifyGoogleToken, getScanStatus);
 router.get('/reports', verifyGoogleToken, getReports);

@@ -53,45 +53,68 @@ class Report {
   }
 
   /**
-   * Find all reports belonging to a user (no pagination — used for small datasets)
+   * Helper to retrieve historical retention interval for a user based on tier
+   */
+  static async getHistoryInterval(userId) {
+    try {
+      const userRes = await pool.query('SELECT subscription_tier FROM users WHERE id = $1', [userId]);
+      const tier = userRes.rows[0]?.subscription_tier || 'Free';
+      if (tier === 'Basic') return '30 days';
+      if (tier === 'Pro') return '90 days';
+      if (tier === 'Business') return '365 days';
+      return '7 days'; // Free Trial
+    } catch (e) {
+      return '7 days';
+    }
+  }
+
+  /**
+   * Find all reports belonging to a user matching plan retention limits
    */
   static async findByUserId(userId) {
+    const interval = await this.getHistoryInterval(userId);
     const query = `
       SELECT test_id as "testId", true as "hasReport", user_id as "userId",
              frontend_url as "frontendUrl", test_date as "testDate", 
              overall_score as "overallScore", total_pages as "totalPages", status
       FROM reports
-      WHERE user_id = $1
+      WHERE user_id = $1 AND test_date >= CURRENT_DATE - CAST($2 AS INTERVAL)
       ORDER BY test_date DESC;
     `;
-    const res = await pool.query(query, [userId]);
+    const res = await pool.query(query, [userId, interval]);
     return res.rows;
   }
 
   /**
-   * Find reports with LIMIT/OFFSET pagination
+   * Find reports with LIMIT/OFFSET pagination matching plan retention limits
    */
   static async findByUserIdPaginated(userId, page = 1, limit = 20) {
     const offset = (page - 1) * limit;
+    const interval = await this.getHistoryInterval(userId);
     const query = `
       SELECT test_id as "testId", true as "hasReport", user_id as "userId",
              frontend_url as "frontendUrl", test_date as "testDate",
              overall_score as "overallScore", total_pages as "totalPages", status
       FROM reports
-      WHERE user_id = $1
+      WHERE user_id = $1 AND test_date >= CURRENT_DATE - CAST($2 AS INTERVAL)
       ORDER BY test_date DESC
-      LIMIT $2 OFFSET $3;
+      LIMIT $3 OFFSET $4;
     `;
-    const res = await pool.query(query, [userId, limit, offset]);
+    const res = await pool.query(query, [userId, interval, limit, offset]);
     return res.rows;
   }
 
   /**
-   * Count total reports for a user (used for pagination metadata)
+   * Count total reports for a user within plan retention limits
    */
   static async countByUserId(userId) {
-    const query = `SELECT COUNT(*)::int as count FROM reports WHERE user_id = $1;`;
-    const res = await pool.query(query, [userId]);
+    const interval = await this.getHistoryInterval(userId);
+    const query = `
+      SELECT COUNT(*)::int as count 
+      FROM reports 
+      WHERE user_id = $1 AND test_date >= CURRENT_DATE - CAST($2 AS INTERVAL);
+    `;
+    const res = await pool.query(query, [userId, interval]);
     return res.rows[0].count;
   }
 

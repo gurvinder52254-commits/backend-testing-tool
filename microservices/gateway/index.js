@@ -31,7 +31,7 @@ const queue = require('../shared/queue');
 const scanStore = require('../shared/scanStore');
 
 // Reuse the monolith's auth + controllers verbatim (identical behaviour).
-const { verifyGoogleToken, generateSessionToken } = require('../../middleware/authMiddleware');
+const { verifyGoogleToken, generateSessionToken, checkCredits } = require('../../middleware/authMiddleware');
 const controller = require('../../controllers/reportController');
 const Report = require('../../models/Report');
 const aiAudit = require('../../controllers/aiAuditController');
@@ -103,7 +103,7 @@ app.post('/api/login', verifyGoogleToken, (req, res) => {
 });
 
 // start-test is the ONLY overridden endpoint: enqueue instead of run inline.
-app.post('/api/start-test', verifyGoogleToken, async (req, res) => {
+app.post('/api/start-test', verifyGoogleToken, checkCredits, async (req, res) => {
   try {
     let { frontendUrl, backendUrl, scanType, userDetails, urls } = req.body || {};
     if (!frontendUrl) {
@@ -119,6 +119,15 @@ app.post('/api/start-test', verifyGoogleToken, async (req, res) => {
     }
 
     const testId = uuidv4().substring(0, 8);
+    
+    // Deduct 1 credit from user and log to ledger
+    const { pool } = require('../../config/db');
+    await pool.query('UPDATE users SET credits = credits - 1 WHERE id = $1', [req.userId]);
+    await pool.query(
+      'INSERT INTO credit_transactions (user_id, amount, description) VALUES ($1, -1, $2)',
+      [req.userId, `Scan initiated/enqueued for URL: ${frontendUrl}`]
+    );
+
     await scanStore.createScan({ testId, userId: req.userId, frontendUrl, backendUrl, scanType });
     await queue.send(config.queues.scan, {
       testId, userId: req.userId, frontendUrl, backendUrl: backendUrl || null,
@@ -156,6 +165,9 @@ app.get('/api/reports/:testId/pages', verifyGoogleToken, controller.getReportPag
 app.get('/api/reports/:testId', verifyGoogleToken, controller.getReport);
 app.post('/api/test', verifyGoogleToken, controller.testLegacy);
 app.post('/api/groq-analyze', verifyGoogleToken, controller.groqAnalyze);
+
+// Profile and Credits route mounts
+app.use('/api/profile', require('../../routes/profileRoutes'));
 
 // ── AI Audit routes — mirrored from monolith ──────────────────
 app.post('/api/ai-audit', verifyGoogleToken, aiAudit.runAiAudit);

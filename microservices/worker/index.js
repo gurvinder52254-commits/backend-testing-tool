@@ -155,7 +155,7 @@ async function handleScan(data) {
   };
 
   try {
-    const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, onUpdate, urls);
+    const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, onUpdate, urls);
     if (report) {
       report.userId = userId;
       await Report.upsertReport({

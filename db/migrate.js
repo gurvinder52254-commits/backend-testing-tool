@@ -157,6 +157,28 @@ async function runMigrations() {
       ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS reproduction_steps TEXT;
     `);
 
+    // Ensure columns for user credits exist
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 1;
+    `);
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR(50) DEFAULT 'Free';
+    `);
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;
+    `);
+
+    // 5. Credit Transactions Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS credit_transactions (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
+        amount INTEGER NOT NULL,
+        description VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     client.release();
 
     console.log('✅ DB Migration: Tables initialized successfully.');

@@ -117,6 +117,7 @@ app.use('/api/screenshots', express.static(reportsDir));
 // ============================================================
 const testRoutes = require('./routes/testRoutes');
 app.use('/api', testRoutes);
+app.use('/api/profile', require('./routes/profileRoutes'));
 
 // Root route
 app.get('/', (req, res) => {

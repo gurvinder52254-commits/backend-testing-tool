@@ -89,6 +89,14 @@ async function startTest(req, res) {
 
     console.log(`\n📨 New test request: ${frontendUrl} [TestID: ${testId}]`);
 
+    // Deduct 1 credit from user and log to ledger
+    const { pool } = require('../config/db');
+    await pool.query('UPDATE users SET credits = credits - 1 WHERE id = $1', [userId]);
+    await pool.query(
+      'INSERT INTO credit_transactions (user_id, amount, description) VALUES ($1, -1, $2)',
+      [userId, `Scan initiated for URL: ${frontendUrl}`]
+    );
+
     // Return immediately to the client
     res.json({
       success: true,
@@ -134,7 +142,7 @@ async function startTest(req, res) {
 
     // Run Playwright scan test in background
     try {
-      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, async (update) => {
+      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, async (update) => {
         // Broadcast updates to WebSocket client
         broadcast({ ...update, testId });
 

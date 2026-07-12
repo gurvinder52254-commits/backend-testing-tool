@@ -249,15 +249,35 @@ async function getAiIssues(req, res) {
   const { testId } = req.params;
   const userId = req.userId;
   try {
-    // 1. Fetch current issues
+    // 1. Fetch user subscription details
+    const userRes = await pool.query('SELECT subscription_tier FROM users WHERE id = $1', [userId]);
+    const tier = userRes.rows[0]?.subscription_tier || 'Free';
+
+    // Free plan users do not have access to AI features
+    if (tier === 'Free') {
+      return res.status(403).json({
+        success: false,
+        error: 'AI Issues Locked: Free Trial users do not have access to AI-based UI audits. Please upgrade to unlock.',
+        code: 'AI_LOCKED'
+      });
+    }
+
+    const taskLimits = {
+      'Basic': 50,
+      'Pro': 200,
+      'Business': 999999
+    };
+    const maxTasks = taskLimits[tier] || 50;
+
+    // 2. Fetch current issues for this test
     let r = await pool.query(
       `SELECT * FROM ai_issues WHERE test_id = $1 AND user_id = $2 ORDER BY
          CASE priority WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END,
-         created_at ASC`,
-      [testId, userId]
+         created_at ASC LIMIT $3`,
+      [testId, userId, maxTasks]
     );
 
-    // 2. If no issues exist, try to parse/seed them from the report_data
+    // 3. If no issues exist, try to parse/seed them from the report_data
     if (r.rows.length === 0) {
       console.log(`🤖 [getAiIssues] No issues in database for test ${testId}. Checking reports fallback...`);
       const reportRes = await pool.query(
@@ -314,10 +334,17 @@ async function getAiIssues(req, res) {
           }
         }
 
-        // Insert extracted issues as individual task rows (one per issue)
+        // Insert extracted issues as individual task rows (one per issue), up to the plan limit
         if (toInsert.length > 0) {
-          console.log(`🤖 [getAiIssues] Seeding ${toInsert.length} fallback issue task(s) from report_data...`);
-          for (const item of toInsert) {
+          const countRes = await pool.query('SELECT COUNT(*)::int as count FROM ai_issues WHERE user_id = $1', [userId]);
+          const currentCount = countRes.rows[0].count || 0;
+          const allowedToSeed = Math.max(0, maxTasks - currentCount);
+
+          console.log(`🤖 [getAiIssues] Seeding ${Math.min(toInsert.length, allowedToSeed)} / ${toInsert.length} fallback issue task(s) from report_data (Max limit: ${maxTasks}, Current count: ${currentCount})...`);
+
+          const slicedInsert = toInsert.slice(0, allowedToSeed);
+
+          for (const item of slicedInsert) {
             await pool.query(
               `INSERT INTO ai_issues
                  (test_id, user_id, page_url, title, description, recommended_fix, priority, status,
@@ -345,8 +372,8 @@ async function getAiIssues(req, res) {
           r = await pool.query(
             `SELECT * FROM ai_issues WHERE test_id = $1 AND user_id = $2 ORDER BY
                CASE priority WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END,
-               created_at ASC`,
-            [testId, userId]
+               created_at ASC LIMIT $3`,
+            [testId, userId, maxTasks]
           );
         }
       }
@@ -374,6 +401,12 @@ async function updateIssueStatus(req, res) {
   }
 
   try {
+    const userRes = await pool.query('SELECT subscription_tier FROM users WHERE id = $1', [userId]);
+    const tier = userRes.rows[0]?.subscription_tier || 'Free';
+    if (tier === 'Free') {
+      return res.status(403).json({ success: false, error: 'Access Denied: Please upgrade your subscription to modify tasks.' });
+    }
+
     const r = await pool.query(
       `UPDATE ai_issues SET status = $1, updated_at = NOW()
        WHERE id = $2 AND user_id = $3 RETURNING *`,
@@ -398,6 +431,12 @@ async function verifyIssue(req, res) {
   const userId = req.userId;
 
   try {
+    const userRes = await pool.query('SELECT subscription_tier FROM users WHERE id = $1', [userId]);
+    const tier = userRes.rows[0]?.subscription_tier || 'Free';
+    if (tier === 'Free') {
+      return res.status(403).json({ success: false, error: 'Access Denied: Please upgrade your subscription to run AI verification.' });
+    }
+
     // Fetch the issue
     const issueRes = await pool.query(
       'SELECT * FROM ai_issues WHERE id = $1 AND user_id = $2',
