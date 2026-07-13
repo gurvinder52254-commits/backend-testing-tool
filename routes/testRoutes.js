@@ -28,6 +28,8 @@ const {
   verifyIssue
 } = require('../controllers/aiAuditController');
 
+const { scanBrokenLinks } = require('../controllers/brokenLinkController');
+
 // REST API Endpoints
 router.get('/health', getHealth);
 router.get('/test/:testId', verifyGoogleToken, getLiveTestStatus);
@@ -61,6 +63,9 @@ router.delete('/reports/:testId', verifyGoogleToken, deleteReport);
 // Legacy/Auxiliary routes
 router.post('/test', verifyGoogleToken, testLegacy);
 router.post('/groq-analyze', verifyGoogleToken, groqAnalyze);
+
+// Scan Page — on-demand broken-link scanner for a single URL
+router.post('/scan-page', verifyGoogleToken, scanBrokenLinks);
 
 // ── AI Audit routes (new — modular, backward-compatible) ──────
 router.post('/ai-audit', verifyGoogleToken, runAiAudit);

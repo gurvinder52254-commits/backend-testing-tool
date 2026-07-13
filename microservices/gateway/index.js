@@ -35,6 +35,7 @@ const { verifyGoogleToken, generateSessionToken, checkCredits } = require('../..
 const controller = require('../../controllers/reportController');
 const Report = require('../../models/Report');
 const aiAudit = require('../../controllers/aiAuditController');
+const { scanBrokenLinks } = require('../../controllers/brokenLinkController');
 
 const log = createLogger('gateway');
 
@@ -166,6 +167,7 @@ app.get('/api/reports/:testId', verifyGoogleToken, controller.getReport);
 app.delete('/api/reports/:testId', verifyGoogleToken, controller.deleteReport);
 app.post('/api/test', verifyGoogleToken, controller.testLegacy);
 app.post('/api/groq-analyze', verifyGoogleToken, controller.groqAnalyze);
+app.post('/api/scan-page', verifyGoogleToken, scanBrokenLinks);
 
 // Profile and Credits route mounts
 app.use('/api/profile', require('../../routes/profileRoutes'));
