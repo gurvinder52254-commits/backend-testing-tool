@@ -812,6 +812,17 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
                     const ogTitle = getMetaContent(['og:title']) || document.title;
                     const keywords = getMetaContent(['keywords', 'news_keywords']) || 'None';
 
+                    // Content Analysis
+                    const bodyText = document.body.innerText.trim();
+                    const words = bodyText.match(/\b[\w'-]+\b/g)?.length || 0;
+                    const sentences = bodyText.match(/[.!?]+/g)?.length || 0;
+                    const paragraphs = bodyText.split(/\n\s*\n/).filter(p => p.trim()).length;
+                    const characters = bodyText.length;
+                    const charactersNoSpaces = bodyText.replace(/\s/g, "").length;
+                    const readingTime = (words / 200).toFixed(1);
+                    const speakingTime = (words / 130).toFixed(1);
+                    const avgWordsPerSentence = sentences ? (words / sentences).toFixed(1) : 0;
+
                     // Image Analysis: Total, Missing Src/Alt, Duplicates
                     const images = Array.from(document.querySelectorAll('img'));
                     const badImages = [];
@@ -862,6 +873,10 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
                     const totalDuplicateImages = Array.from(srcStats.values())
                         .reduce((sum, count) => sum + (count > 1 ? count - 1 : 0), 0);
 
+                    const lazyImages = images.filter(img => img.getAttribute('loading') === "lazy" || img.loading === "lazy").length;
+                    const imagesWithoutSize = images.filter(img => !img.width || !img.height).length;
+
+                    // Link Analysis
                     const brokenLinks = [];
                     const links = Array.from(document.querySelectorAll('a'));
                     const linkStats = new Map();
@@ -898,6 +913,53 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
 
                     const totalDuplicateLinks = Array.from(linkStats.values()).reduce((sum, count) => sum + (count > 1 ? count - 1 : 0), 0);
 
+                    const internalLinks = links.filter(link => link.hostname === location.hostname).length;
+                    const externalLinks = links.filter(link => link.hostname !== location.hostname).length;
+                    const emptyLinks = links.filter(link => link.getAttribute("href") === "#" || !link.textContent.trim()).length;
+                    const javascriptLinks = links.filter(link => (link.href || "").startsWith("javascript:")).length;
+                    const mailtoLinks = links.filter(link => (link.href || "").startsWith("mailto:")).length;
+                    const telLinks = links.filter(link => (link.href || "").startsWith("tel:")).length;
+
+                    // Headings
+                    const h1 = document.querySelectorAll("h1").length;
+                    const h2 = document.querySelectorAll("h2").length;
+                    const h3 = document.querySelectorAll("h3").length;
+                    const h4 = document.querySelectorAll("h4").length;
+                    const h5 = document.querySelectorAll("h5").length;
+                    const h6 = document.querySelectorAll("h6").length;
+
+                    // Structure
+                    const buttons = document.querySelectorAll("button").length;
+                    const forms = document.forms.length;
+                    const inputs = document.querySelectorAll("input").length;
+                    const textareas = document.querySelectorAll("textarea").length;
+                    const selects = document.querySelectorAll("select").length;
+                    const tables = document.querySelectorAll("table").length;
+                    const lists = document.querySelectorAll("ul,ol").length;
+                    const listItems = document.querySelectorAll("li").length;
+                    const videos = document.querySelectorAll("video").length;
+                    const audio = document.querySelectorAll("audio").length;
+                    const iframes = document.querySelectorAll("iframe").length;
+                    const codeBlocks = document.querySelectorAll("pre,code").length;
+                    const blockquotes = document.querySelectorAll("blockquote").length;
+                    const canvas = document.querySelectorAll("canvas").length;
+                    const svg = document.querySelectorAll("svg").length;
+
+                    // Assets
+                    const scripts = document.scripts.length;
+                    const cssFiles = document.querySelectorAll('link[rel="stylesheet"]').length;
+                    const styleTags = document.querySelectorAll("style").length;
+                    const styleBundles = cssFiles + styleTags;
+
+                    // Meta
+                    const title = document.title || "";
+                    const metaDescription = document.querySelector('meta[name="description"]')?.content || "";
+                    const canonical = document.querySelector('link[rel="canonical"]')?.href || "";
+                    const robots = document.querySelector('meta[name="robots"]')?.content || "";
+
+                    // DOM
+                    const domElements = document.querySelectorAll("*").length;
+
                     return {
                         seo: {
                             title: document.title,
@@ -912,23 +974,74 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
                             metaRobots: getMetaContent(['robots']) || '',
                             metaGooglebot: getMetaContent(['googlebot']) || ''
                         },
-                         counts: {
+                        counts: {
                             images: images.length,
                             links: links.length,
-                            h1: document.querySelectorAll('h1').length,
-                            forms: document.querySelectorAll('form').length,
+                            h1: h1,
+                            forms: forms,
                             duplicateImages: totalDuplicateImages,
                             duplicateLinks: totalDuplicateLinks,
                             missingSrc: exactMissingSrc,
                             missingAlt: exactMissingAlt,
-                            scripts: document.querySelectorAll('script').length,
-                            styles: document.querySelectorAll('link[rel="stylesheet"]').length + document.querySelectorAll('style').length
+                            scripts: scripts,
+                            styles: styleBundles,
+                            buttons: buttons
                         },
                         broken: {
                             images: badImages.filter(img => img.isBroken || img.missingSrc),
                             links: brokenLinks
                         },
                         badImages,
+                        structureStats: {
+                            words,
+                            sentences,
+                            paragraphs,
+                            characters,
+                            charactersNoSpaces,
+                            estimatedPages: Math.ceil(words / 500),
+                            readingTime,
+                            speakingTime,
+                            avgWordsPerSentence,
+                            h1, h2, h3, h4, h5, h6,
+                            images: images.length,
+                            missingSrc: exactMissingSrc,
+                            missingAlt: exactMissingAlt,
+                            duplicateImages: totalDuplicateImages,
+                            lazyLoadedImages: lazyImages,
+                            imagesWithoutSize,
+                            totalLinks: links.length,
+                            internalLinks,
+                            externalLinks,
+                            emptyLinks,
+                            duplicateLinks: totalDuplicateLinks,
+                            javascriptLinks,
+                            mailtoLinks,
+                            telLinks,
+                            buttons,
+                            forms,
+                            inputs,
+                            textareas,
+                            selects,
+                            tables,
+                            lists,
+                            listItems,
+                            videos,
+                            audio,
+                            iframes,
+                            codeBlocks,
+                            blockquotes,
+                            canvas,
+                            svg,
+                            jsScripts: scripts,
+                            cssFiles,
+                            styleTags,
+                            styleBundles,
+                            titleLength: title.length,
+                            metaDescriptionLength: metaDescription.length,
+                            canonical: canonical ? "Yes" : "No",
+                            robotsMeta: robots || "Missing",
+                            domElements
+                        }
                     };
                 });
 
