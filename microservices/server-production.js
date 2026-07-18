@@ -25,19 +25,19 @@ const { WebSocketServer } = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
 // ── DB & Models ──────────────────────────────────────────────
-const { pool } = require('./config/db');
-const Report = require('./models/Report');
+const { pool } = require('../config/db');
+const Report = require('../models/Report');
 
 // ── Controllers (monolith-compatible) ────────────────────────
-const { verifyGoogleToken, generateSessionToken, checkCredits } = require('./middleware/authMiddleware');
-const controller = require('./controllers/reportController');
-const aiAudit = require('./controllers/aiAuditController');
-const { scanBrokenLinks } = require('./controllers/brokenLinkController');
-const { initializeGemini } = require('./geminiAnalyzer');
-const { initializeGroq } = require('./groqAnalyzer');
+const { verifyGoogleToken, generateSessionToken, checkCredits } = require('../middleware/authMiddleware');
+const controller = require('../controllers/reportController');
+const aiAudit = require('../controllers/aiAuditController');
+const { scanBrokenLinks } = require('../controllers/brokenLinkController');
+const { initializeGemini } = require('../geminiAnalyzer');
+const { initializeGroq } = require('../groqAnalyzer');
 
 // ── Migrations ────────────────────────────────────────────────
-const { runMigrations } = require('./db/migrate');
+const { runMigrations } = require('../db/migrate');
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
@@ -189,9 +189,9 @@ app.post('/api/login', verifyGoogleToken, (req, res) => {
   res.json({ success: true, token, user: { id: req.userId, email: req.userEmail, name: req.userName, picture: req.userPicture } });
 });
 
-const testRoutes = require('./routes/testRoutes');
+const testRoutes = require('../routes/testRoutes');
 app.use('/api', testRoutes);
-app.use('/api/profile', require('./routes/profileRoutes'));
+app.use('/api/profile', require('../routes/profileRoutes'));
 
 app.get('/', (req, res) => {
   res.json({ message: '🚀 Website Testing Platform API v2.0 (Production)', status: 'OK', websocket: `ws://0.0.0.0:${PORT}/ws` });
