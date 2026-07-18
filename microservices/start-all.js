@@ -17,12 +17,13 @@ const { spawn } = require('child_process');
 const ROOT = path.join(__dirname, '..'); // backend-testing-tool
 const node = process.execPath;
 
+// Drop-in stack: gateway (API + WS on :3001) + worker (full engine).
+// The frontend talks only to the gateway — no other services required.
+// (ai-service / orchestrator / realtime are the alternative "fine-grained
+//  split" and are intentionally not started in drop-in mode.)
 const SERVICES = [
-  { name: 'ai-service', file: 'microservices/ai-service/index.js' },
-  { name: 'orchestrator', file: 'microservices/orchestrator/index.js' },
-  { name: 'worker', file: 'microservices/worker/index.js' },
-  { name: 'realtime', file: 'microservices/realtime/index.js' },
   { name: 'gateway', file: 'microservices/gateway/index.js' },
+  { name: 'worker', file: 'microservices/worker/index.js' },
 ];
 
 const children = [];

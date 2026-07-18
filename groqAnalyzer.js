@@ -24,22 +24,68 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 function sanitizeJsonString(raw) {
     if (!raw) return '';
 
-    // 1. Remove markdown code blocks
-    let clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+    // 1. Remove markdown code blocks and reasoning thinking blocks
+    let clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-    // 2. Extract only the first { ... } or [ ... ] block
-    const jsonMatch = clean.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (!jsonMatch) return clean;
-    clean = jsonMatch[0];
+    // 2. Extract only the first valid { ... } or [ ... ] block using bracket counting
+    let startChar = '';
+    let endChar = '';
+    let startIndex = -1;
+
+    for (let i = 0; i < clean.length; i++) {
+        if (clean[i] === '{') {
+            startChar = '{';
+            endChar = '}';
+            startIndex = i;
+            break;
+        } else if (clean[i] === '[') {
+            startChar = '[';
+            endChar = ']';
+            startIndex = i;
+            break;
+        }
+    }
+
+    if (startIndex !== -1) {
+        let bracketCount = 0;
+        let inString = false;
+        let escape = false;
+
+        for (let i = startIndex; i < clean.length; i++) {
+            const char = clean[i];
+
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (char === '\\') {
+                escape = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString) {
+                if (char === startChar) {
+                    bracketCount++;
+                } else if (char === endChar) {
+                    bracketCount--;
+                    if (bracketCount === 0) {
+                        clean = clean.substring(startIndex, i + 1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // 3. Fix unescaped backslashes: 
-    // A backslash is invalid in JSON unless followed by " \ / b f n r t uXXXX
-    // We look for backslashes NOT followed by one of those and escape them.
-    // This is tricky; a simpler approach is to fix common "bad" escapes like \( \) \. \* 
-    // which the AI often includes when writing selectors or regex.
     clean = clean.replace(/\\([^"\\\/bfnrtu])/g, '\\\\$1');
 
-    // 4. Remove trailing commas in objects/arrays (some parsers hate this)
+    // 4. Remove trailing commas in objects/arrays
     clean = clean.replace(/,\s*([\}\]])/g, '$1');
 
     return clean;
@@ -89,7 +135,7 @@ async function callGroqVision(base64Image, prompt, maxTokens = 4096, retryCount 
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+                model: 'qwen/qwen3.6-27b',
                 messages: [
                     {
                         role: 'user',
@@ -293,7 +339,7 @@ Generate test cases that cover all critical functionality. Return ONLY valid JSO
     "summary": "<1-2 sentence summary of test coverage>"
 }`;
 
-        const responseText = await callGroqVision(base64Image, prompt, 6000);
+        const responseText = await callGroqVision(base64Image, prompt, 1500);
 
         const cleanJson = sanitizeJsonString(responseText);
 
@@ -355,7 +401,7 @@ Return ONLY valid JSON (no markdown, no code blocks):
     ]
 }`;
 
-        const responseText = await callGroqVision(base64Image, prompt, 8000);
+        const responseText = await callGroqVision(base64Image, prompt, 2048);
 
         const cleanJson = sanitizeJsonString(responseText);
 
@@ -470,6 +516,29 @@ async function runGroqAnalysisPipeline(screenshotPath, pageUrl, pageTitle, userD
             });
         }
 
+        // Add small delay to prevent rapid token usage
+        await sleep(2000);
+
+        // STEP 4: Comprehensive AI Audit (new requirement)
+        if (sendUpdate) {
+            sendUpdate({
+                type: 'groq-status',
+                step: 'ai-audit',
+                message: `🤖 Groq AI performing complete page audit for ${pageUrl}...`,
+            });
+        }
+
+        result.auditResult = await auditPageIssues(screenshotPath, pageUrl, pageTitle);
+
+        if (sendUpdate) {
+            sendUpdate({
+                type: 'groq-audit-complete',
+                url: pageUrl,
+                audit: result.auditResult,
+                message: `✅ AI page audit complete: found ${result.auditResult?.issues?.length || 0} issues`,
+            });
+        }
+
         result.status = 'complete';
     } catch (error) {
         result.status = 'error';
@@ -478,6 +547,146 @@ async function runGroqAnalysisPipeline(screenshotPath, pageUrl, pageTitle, userD
     }
 
     return result;
+}
+
+/**
+ * Normalized dedupe key for an audit issue (category + first ~60 chars of title).
+ */
+function auditIssueKey(issue) {
+    const t = String(issue.title || issue.description || '')
+        .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 60);
+    const c = String(issue.category || '').toLowerCase();
+    return `${c}::${t}`;
+}
+
+/**
+ * Merge two independent audit passes on the SAME screenshot.
+ * Union of issues (nothing missed) + dedupe. Issues found in BOTH passes are
+ * marked verifiedInBothPasses (higher confidence).
+ */
+function mergeAuditIssues(passA, passB) {
+    const map = new Map();
+    const add = (issue, passNo) => {
+        if (!issue || (!issue.title && !issue.description)) return;
+        const key = auditIssueKey(issue);
+        if (map.has(key)) {
+            map.get(key)._passes.add(passNo);
+        } else {
+            map.set(key, { ...issue, _passes: new Set([passNo]) });
+        }
+    };
+    (Array.isArray(passA) ? passA : []).forEach((i) => add(i, 1));
+    (Array.isArray(passB) ? passB : []).forEach((i) => add(i, 2));
+
+    const sev = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+    return Array.from(map.values())
+        .map((issue) => {
+            const confirmed = issue._passes.size >= 2;
+            const { _passes, ...rest } = issue;
+            const steps = Array.isArray(rest.reproductionSteps)
+                ? rest.reproductionSteps
+                : (rest.reproductionSteps ? [String(rest.reproductionSteps)] : []);
+            return {
+                ...rest,
+                reproductionSteps: steps,
+                verifiedInBothPasses: confirmed,
+                confidenceScore: confirmed ? '95%' : (rest.confidenceScore || '80%'),
+            };
+        })
+        .sort((x, y) => {
+            if (x.verifiedInBothPasses !== y.verifiedInBothPasses) return x.verifiedInBothPasses ? -1 : 1;
+            return (sev[x.severity] ?? 2) - (sev[y.severity] ?? 2);
+        });
+}
+
+/**
+ * STEP 4 Helper: Comprehensive page audit using Groq Vision.
+ * Sends the SAME screenshot to the model in TWO identical requests
+ * (cross-verification) and merges the results into structured UI test cases,
+ * each with expected behavior, actual behavior, and reproduction steps.
+ */
+async function auditPageIssues(screenshotPath, pageUrl, pageTitle) {
+    if (!isInitialized && !initializeGroq()) {
+        return { success: false, error: 'Groq API key not configured', issues: [] };
+    }
+
+    try {
+        const imageBuffer = fs.readFileSync(screenshotPath);
+        const base64Image = imageBuffer.toString('base64');
+
+        const systemPrompt = `You are a professional website QA engineer, UX designer, and accessibility auditor.
+Analyze the provided webpage screenshot and produce a list of concrete UI/UX TEST CASES (issues).
+Run all of these checks:
+1. UI/UX consistency, visual hierarchy, branding, icon/font/color consistency.
+2. Grammar, spelling, punctuation, copy quality, keyword stuffing.
+3. Design & structure: missing/incomplete sections, placeholder content, outline.
+4. Layout & rendering: text overlap, misalignment, spacing/padding, overflow, clipping, z-index.
+5. Header/footer & navigation: completeness, alignment, logo placement.
+6. Buttons & interactive elements: MISSING or BLANK buttons/labels, inconsistent styles/sizes/colors, missing states.
+7. Inputs & forms: structure, fields, validation UI feedback.
+8. Accessibility: contrast, alt text, labels, focus indicators.
+9. Rendering performance: layout shift, unoptimized/blank images.
+
+Return ONLY valid JSON (no markdown, no extra text) in EXACTLY this shape:
+{
+  "issues": [
+    {
+      "title": "Short issue title (max 80 chars)",
+      "category": "ui_ux|layout|grammar|rendering|design|buttons|header_footer|accessibility|forms",
+      "severity": "Critical|High|Medium|Low",
+      "affectedElement": "Specific element/section affected (e.g. 'Hero secondary CTA button')",
+      "description": "What is wrong and why it is a problem",
+      "expectedBehavior": "What the correct/expected UI or behavior should be",
+      "actualBehavior": "What is actually observed in this screenshot",
+      "reproductionSteps": ["Open the page", "Look at ...", "Observe ..."],
+      "recommendedFix": "Specific, actionable fix",
+      "confidenceScore": "0-100%"
+    }
+  ]
+}
+
+Rules:
+- Report ONLY real issues visible in the screenshot. Do not invent issues. If a category is fine, omit it.
+- Be specific: reference actual text, colors, positions, and elements you can see.
+- severity: Critical=broken/unusable, High=significant, Medium=notable, Low=minor.
+- reproductionSteps must be concrete and start from opening the page.`;
+
+        const userPrompt = `Audit this webpage screenshot: "${pageUrl}" (Title: "${pageTitle}"). Return the JSON test-case list.`;
+        const prompt = systemPrompt + "\n\n" + userPrompt;
+
+        const parsePass = (settled) => {
+            if (settled.status !== 'fulfilled' || !settled.value) return [];
+            try {
+                const parsed = JSON.parse(sanitizeJsonString(settled.value));
+                if (Array.isArray(parsed)) return parsed;
+                return Array.isArray(parsed.issues) ? parsed.issues : [];
+            } catch {
+                return [];
+            }
+        };
+
+        // Send the SAME image in two identical requests for cross-verification.
+        const [rA, rB] = await Promise.allSettled([
+            callGroqVision(base64Image, prompt, 1500),
+            callGroqVision(base64Image, prompt, 1500),
+        ]);
+
+        const issuesA = parsePass(rA);
+        const issuesB = parsePass(rB);
+
+        if (issuesA.length === 0 && issuesB.length === 0) {
+            if (rA.status === 'rejected' && rB.status === 'rejected') {
+                return { success: false, error: rA.reason?.message || rB.reason?.message || 'AI audit failed', issues: [] };
+            }
+            return { success: true, issues: [], passes: { a: 0, b: 0 } };
+        }
+
+        const merged = mergeAuditIssues(issuesA, issuesB);
+        return { success: true, issues: merged, passes: { a: issuesA.length, b: issuesB.length } };
+    } catch (error) {
+        console.error(`❌ Groq page audit error for ${pageUrl}:`, error.message);
+        return { success: false, error: error.message, issues: [] };
+    }
 }
 
 /**
@@ -527,4 +736,5 @@ module.exports = {
     suggestTestCases,
     generatePlaywrightCode,
     runGroqAnalysisPipeline,
+    auditPageIssues,
 };

@@ -38,6 +38,14 @@ const config = {
     ai: process.env.MS_AI_URL || `http://127.0.0.1:${num(process.env.MS_AI_PORT, 4002)}`,
   },
 
+  // ---- Drop-in mode: gateway replaces the monolith on the SAME port (3001)
+  // so the existing frontend works unchanged. The worker POSTs engine events
+  // back to the gateway's internal endpoint for WS broadcast. ----
+  dropinPort: num(process.env.MS_DROPIN_PORT, 3001),
+  internalBroadcastUrl:
+    process.env.MS_INTERNAL_BROADCAST_URL ||
+    `http://127.0.0.1:${num(process.env.MS_DROPIN_PORT, 3001)}/internal/broadcast`,
+
   // ---- Queue (pg-boss on the shared Postgres — no Redis needed) ----
   queues: {
     scan: 'scan',

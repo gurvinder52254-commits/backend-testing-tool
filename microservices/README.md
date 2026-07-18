@@ -1,14 +1,40 @@
-# Microservices Architecture (Phase 1 → runnable)
+# Microservices Architecture
 
-A microservices decomposition of the website-testing engine that runs
-**alongside** the existing monolith without changing it. It reuses the
-existing engine code (`playwrightTester`, `geminiAnalyzer`, `groqAnalyzer`,
-`models/*`) and uses the **existing PostgreSQL** as both the durable job
-queue (via `pg-boss`) and the realtime bus (via `LISTEN/NOTIFY`) — so
-**no Redis / no extra infrastructure** is required to run it.
+Two ways to run this. **Drop-in mode is the default** and is what `npm run ms:all` starts.
 
-The monolith keeps running unchanged on port **3001**. These services run
-on **4000–4004**.
+## Mode A — Drop-in replacement (default, full parity)
+
+A **gateway** binds the SAME port (**3001**) and serves the SAME REST API +
+broadcast WebSocket as the monolith, so the **existing frontend works with
+zero changes**. Scans are pushed onto a durable `pg-boss` queue and executed
+by a separate **worker** that runs the exact same `runWebsiteTest()` engine —
+so functionality is identical (crawl, SEO, images/videos, broken links, Groq
+tests, desktop+mobile screenshots, live previews, scoring). The worker streams
+every engine event back to the gateway (`POST /internal/broadcast`) for WS
+fan-out.
+
+- Run: **`npm run ms:all`** (migrate + gateway + worker). Stop the monolith first
+  (both use port 3001).
+- Frontend: unchanged — still points at `http://localhost:3001`.
+- Benefit over the monolith: scans are durable (survive restart) and the worker
+  scales independently of the API.
+
+```
+Frontend (:3001, unchanged) ──REST + ws://:3001/ws──► gateway ──pg-boss──► worker
+                                              ▲                              │
+                                              └──── POST /internal/broadcast ┘ (runWebsiteTest)
+```
+
+Uses the **existing PostgreSQL** for the queue (`pg-boss`) — **no Redis / no
+extra infrastructure**.
+
+## Mode B — Fine-grained split (alternative, partial parity)
+
+The originally-scaffolded split (gateway :4000 + realtime :4001 + ai-service
+:4002 + orchestrator + worker with per-page tester). It demonstrates true
+service separation but the per-page tester is a **subset** of the full engine.
+Start these individually with `npm run ms:orchestrator` / `ms:realtime` /
+`ms:ai` (not started by `ms:all`). The sections below describe this mode.
 
 ## Services
 

@@ -1,250 +1,253 @@
 /**
  * ============================================================
- * microservices/worker — Crawler + Page-Tester Worker
+ * microservices/worker — DROP-IN Scan Worker
  * ============================================================
- * The heavy, browser-bound service. Consumes two queues:
+ * Consumes `scan` jobs from the durable queue and runs the FULL
+ * monolith engine (runWebsiteTest) — so functionality is
+ * identical to the monolith (crawl, SEO, images, videos,
+ * broken links, Groq tests, desktop+mobile screenshots, live
+ * previews, scoring, everything).
  *
- *   discovery  → crawl the site, cap to maxPages, record the URL
- *                set, then fan OUT one `page-test` job per URL.
- *   page-test  → test a single page, ask the AI service to score
- *                it, persist the result, and when the LAST page
- *                of a scan finishes, enqueue `finalize`.
- *
- * One shared Chromium is reused across page jobs; each page gets
- * its own context (isolation) that is always closed. Page-level
- * parallelism = MS_PAGE_CONCURRENCY.
+ * Every engine event is:
+ *   1) POSTed to the gateway's /internal/broadcast → WS fan-out
+ *      (same events the frontend already understands), and
+ *   2) folded into an incremental report that is upserted to
+ *      Postgres — exactly like the monolith controller did.
  * ============================================================
  */
 
 const http = require('http');
-const { chromium } = require('playwright');
 
-const config = require('../shared/config');
+const config = require('../shared/config'); // loads dotenv FIRST
 const { createLogger } = require('../shared/logger');
 const queue = require('../shared/queue');
 const scanStore = require('../shared/scanStore');
-const { emitEvent, EventType } = require('../shared/events');
-const { discover } = require('./crawler');
-const { testPage } = require('./pageTester');
+const { runWebsiteTest } = require('../../playwrightTester');
+const Report = require('../../models/Report');
 
 const log = createLogger('worker');
 
-// ---- shared browser lifecycle ----
-let browser = null;
-async function getBrowser() {
-  if (browser && browser.isConnected()) return browser;
-  browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--no-zygote',
-    ],
-  });
-  log.ok('Chromium launched.');
-  return browser;
-}
-
-// ---- best-effort call to the AI service (never throws) ----
-async function requestAiAnalysis(payload) {
+// Forward one engine event to the gateway for WS broadcast (order-preserving).
+async function postEvent(update) {
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), config.limits.aiTimeoutMs + 5000);
-    const res = await fetch(`${config.urls.ai}/analyze`, {
+    await fetch(config.internalBroadcastUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
+      body: JSON.stringify(update),
     });
-    clearTimeout(t);
-    if (!res.ok) throw new Error(`AI service HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    log.warn('AI analysis unavailable (using defaults):', err.message);
-    return { aiAnalysis: null, groqAnalysis: null };
+  } catch (_) {
+    // Gateway unreachable — non-fatal; the scan + DB save still proceed.
   }
 }
 
-// best-effort call to the responsive (desktop+mobile) analysis endpoint
-async function requestResponsiveAnalysis(payload) {
+function freshReport(testId, frontendUrl, backendUrl) {
+  return {
+    testId,
+    frontendUrl,
+    backendUrl: backendUrl || null,
+    testDate: new Date().toISOString(),
+    totalPages: 0,
+    pagesCompleted: 0,
+    headerLinks: [],
+    footerLinks: [],
+    pages: [],
+    overallScore: 0,
+    status: 'running',
+    globalSummary: {
+      totalErrors: 0,
+      brokenLinks: [],
+      missingResources: [],
+      seoIssues: [],
+      elementStats: {
+        totalImages: 0, totalLinks: 0, totalButtons: 0,
+        totalMissingAlt: 0, totalMissingSrc: 0, totalDuplicateImages: 0,
+      },
+      suggestedFixes: [],
+    },
+  };
+}
+
+async function handleScan(data) {
+  const { testId, userId, frontendUrl, backendUrl, scanType, userDetails, urls } = data;
+  log.info(`Running scan ${testId} → ${frontendUrl}`);
+  await scanStore.setStatus(testId, 'running');
+
+  const rep = freshReport(testId, frontendUrl, backendUrl);
+
+  // Initialize report immediately in the database to prevent null state on page reload
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), config.limits.aiTimeoutMs + 5000);
-    const res = await fetch(`${config.urls.ai}/analyze-responsive`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
+    await Report.upsertReport({
+      testId, userId, frontendUrl, backendUrl: backendUrl || null,
+      testDate: rep.testDate, overallScore: rep.overallScore,
+      totalPages: rep.totalPages, status: 'running', reportData: rep,
     });
-    clearTimeout(t);
-    if (!res.ok) throw new Error(`AI service HTTP ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    log.warn('Responsive analysis unavailable:', err.message);
-    return { responsiveAnalysis: null };
-  }
-}
-
-// ---- discovery handler ----
-async function handleDiscovery(data) {
-  const { testId, userId, frontendUrl, userDetails, urls: providedUrls } = data;
-  log.info(`Discovery for ${testId} → ${frontendUrl}`);
-
-  let urls = [];
-  let headerLinks = [];
-  let footerLinks = [];
-
-  if (Array.isArray(providedUrls) && providedUrls.length > 0) {
-    // Explicit URL list supplied by the client — skip crawling.
-    urls = providedUrls.map((u) =>
-      typeof u === 'string' ? { url: u, text: '', source: 'body' } : u
-    );
-  } else {
-    const found = await discover(frontendUrl);
-    urls = found.urls;
-    headerLinks = found.headerLinks;
-    footerLinks = found.footerLinks;
+  } catch (dbInitErr) {
+    log.warn('⚠️ Failed to initialize report in database:', dbInitErr.message);
   }
 
-  // Safety cap — and log what we dropped (no silent truncation).
-  const total = urls.length;
-  if (total > config.limits.maxPages) {
-    log.warn(`Capping ${total} pages → ${config.limits.maxPages} (MS_MAX_PAGES).`);
-    urls = urls.slice(0, config.limits.maxPages);
-  }
+  const onUpdate = async (update) => {
+    // 1) live event → gateway WS
+    postEvent({ ...update, testId });
 
-  await scanStore.setDiscovery(testId, {
-    totalPages: urls.length,
-    headerLinks,
-    footerLinks,
-  });
-  await emitEvent({
-    testId,
-    userId,
-    type: EventType.LINKS_DISCOVERED,
-    payload: { totalPages: urls.length, headerLinks, footerLinks, cappedFrom: total },
-  });
-
-  if (urls.length === 0) {
-    // Nothing to test — go straight to finalize.
-    await queue.send(config.queues.finalize, { testId, userId });
-    return;
-  }
-
-  // Fan out: one job per page.
-  for (let i = 0; i < urls.length; i++) {
-    const u = urls[i];
-    await queue.send(config.queues.pageTest, {
-      testId,
-      userId,
-      pageIndex: i,
-      url: u.url,
-      source: u.source || 'body',
-      text: u.text || '',
-      userDetails,
-    });
-  }
-  log.ok(`Discovery ${testId}: enqueued ${urls.length} page jobs.`);
-}
-
-// ---- page-test handler ----
-async function handlePageTest(data) {
-  const { testId, userId, pageIndex, url, source, text, userDetails } = data;
-
-  await emitEvent({
-    testId,
-    userId,
-    type: EventType.PAGE_START,
-    payload: { pageIndex, url },
-  });
-
-  const b = await getBrowser();
-  const result = await testPage(b, { testId, pageIndex, url, source, text });
-
-  // Enrich with AI (best-effort; page result already valid without it).
-  if (result.screenshotPath) {
-    const ai = await requestAiAnalysis({
-      screenshotPath: result.screenshotPath,
-      url,
-      title: result.title,
-      userDetails,
-    });
-    result.aiAnalysis = ai.aiAnalysis || null;
-    result.groqAnalysis = ai.groqAnalysis || null;
-  }
-
-  // Responsive (desktop + mobile) analysis — both screenshots to AI in one call.
-  if (result.desktopPath && result.mobilePath) {
-    const r = await requestResponsiveAnalysis({
-      desktopPath: result.desktopPath,
-      mobilePath: result.mobilePath,
-      url,
-      title: result.title,
-    });
-    result.responsiveAnalysis = r.responsiveAnalysis || null;
-    // Keep overall scoring working even if the single-shot analysis was skipped.
-    if ((!result.aiAnalysis || !result.aiAnalysis.overallScore) && result.responsiveAnalysis) {
-      result.aiAnalysis = {
-        overallScore: result.responsiveAnalysis.overallScore || 0,
-        summary: result.responsiveAnalysis.summary,
-        source: 'responsive',
-      };
-    }
-  }
-
-  // internal-only fields; clients get the URLs via result.screenshots
-  delete result.screenshotPath;
-  delete result.desktopPath;
-  delete result.mobilePath;
-
-  await scanStore.savePage(testId, pageIndex, url, result);
-  await emitEvent({
-    testId,
-    userId,
-    type: result.error ? EventType.PAGE_ERROR : EventType.PAGE_COMPLETE,
-    payload: { pageIndex, result },
-  });
-
-  // Was this the last page? If so, trigger finalization exactly once.
-  const { completedPages, totalPages } = await scanStore.incrementCompleted(testId);
-  log.info(`Page ${pageIndex} done for ${testId} (${completedPages}/${totalPages}).`);
-  if (totalPages > 0 && completedPages >= totalPages) {
-    await queue.send(config.queues.finalize, { testId, userId });
-  }
-}
-
-// ---- health endpoint ----
-function startHealthServer() {
-  http
-    .createServer((req, res) => {
-      if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({ success: true, service: 'worker', browser: !!(browser && browser.isConnected()) })
-        );
-      } else {
-        res.writeHead(404);
-        res.end();
+    // 2) incremental persistence (same logic as the monolith controller)
+    try {
+      // Accumulate logs in memory for restoration on refresh
+      if (!rep.statusLogs) rep.statusLogs = [];
+      const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+      const logType = update.type === 'page-error' || update.type === 'test-error' ? 'error' :
+                      (update.type === 'ai-analyzing' || update.type === 'groq-status' ? 'ai' : 
+                       (update.type === 'page-complete' || update.type === 'test-complete' ? 'success' : 'info'));
+      
+      let logMessage = '';
+      if (update.message) {
+        logMessage = update.message;
+      } else if (update.type === 'links-discovered') {
+        logMessage = `Discovered ${update.totalPages} pages (${update.headerLinks} header, ${update.footerLinks} footer)`;
+      } else if (update.type === 'page-start') {
+        logMessage = `Testing page ${update.pageIndex + 1}/${update.totalPages}: ${update.text || update.url}`;
+      } else if (update.type === 'screenshot-taken') {
+        logMessage = `📸 Screenshot captured: ${update.url}`;
+      } else if (update.type === 'ai-analyzing') {
+        logMessage = `🤖 AI analyzing page ${update.pageIndex + 1}...`;
+      } else if (update.type === 'ai-complete') {
+        logMessage = `✅ AI analysis complete for page ${update.pageIndex + 1}`;
       }
-    })
-    .listen(config.ports.workerHealth, () =>
-      log.info(`Health on http://127.0.0.1:${config.ports.workerHealth}/health`)
-    );
+
+      if (logMessage) {
+        rep.statusLogs.push({
+          id: rep.statusLogs.length + 1,
+          message: logMessage,
+          type: logType,
+          time
+        });
+      }
+
+      if (update.type === 'live-screenshot') {
+        rep.latestLiveScreenshot = `data:image/png;base64,${update.image}`;
+        rep.latestLiveUrl = update.url;
+      }
+
+      if (update.type === 'links-discovered') {
+        rep.totalPages = update.totalPages;
+        rep.headerLinks = update.headerLinks || [];
+        rep.footerLinks = update.footerLinks || [];
+      } else if (update.type === 'page-complete') {
+        rep.pagesCompleted = update.pageIndex + 1;
+        const result = update.result || {};
+        const pageData = {
+          index: update.pageIndex,
+          url: result.url,
+          title: result.title,
+          text: result.title || '',
+          source: result.source || 'body',
+          loadStatus: result.loadStatus,
+          loadTimeMs: result.loadTimeMs || 0,
+          httpStatus: result.httpStatus || 200,
+          screenshotUrl: result.screenshotUrl,
+          desktopScreenshotUrl: result.desktopScreenshotUrl || result.screenshotUrl,
+          mobileScreenshotUrl: result.mobileScreenshotUrl || '',
+          indexStatus: result.indexStatus || 'unknown',
+          robots: result.robots || null,
+          consoleErrors: result.consoleErrors || [],
+          networkErrors: result.networkErrors || [],
+          // ✅ FIX: networkLog was missing — Network Activity was not showing in new scans
+          networkLog: result.networkLog || { requests: [], summary: { totalRequests: 0, totalSize: 0, totalTransferred: 0, domContentLoaded: 0, loadTime: 0, finishTime: 0 } },
+          elementsInfo: result.elementsInfo || {},
+          brokenLinksCheck: result.brokenLinksCheck || [],
+          imageCheckResults: result.imageCheckResults || [],
+          videoCheckResults: result.videoCheckResults || [],
+          aiAnalysis: result.aiAnalysis,
+          groqAnalysis: result.groqAnalysis,
+          error: result.error || null,
+        };
+        const idx = rep.pages.findIndex((p) => p.url === result.url);
+        if (idx >= 0) rep.pages[idx] = pageData;
+        else rep.pages.push(pageData);
+
+        rep.globalSummary.totalErrors = rep.pages.reduce(
+          (s, p) => s + p.consoleErrors.length + p.networkErrors.length, 0
+        );
+        const scores = rep.pages
+          .filter((p) => p.aiAnalysis && p.aiAnalysis.overallScore > 0)
+          .map((p) => p.aiAnalysis.overallScore);
+        rep.overallScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+      } else if (update.type === 'page-error') {
+        rep.pagesCompleted = update.pageIndex + 1;
+        const pageData = {
+          index: update.pageIndex, url: update.url, title: 'Error', text: 'Error',
+          source: 'error', loadStatus: 'ERROR', loadTimeMs: 0, httpStatus: 500,
+          screenshotUrl: '', desktopScreenshotUrl: '', mobileScreenshotUrl: '',
+          consoleErrors: [], networkErrors: [], elementsInfo: {},
+          brokenLinksCheck: [], imageCheckResults: [], videoCheckResults: [],
+          error: update.error,
+        };
+        const idx = rep.pages.findIndex((p) => p.url === update.url);
+        if (idx >= 0) rep.pages[idx] = pageData;
+        else rep.pages.push(pageData);
+      }
+
+      // Save incremental report on every update
+      await Report.upsertReport({
+        testId, userId, frontendUrl, backendUrl: backendUrl || null,
+        testDate: rep.testDate, overallScore: rep.overallScore,
+        totalPages: rep.totalPages, status: 'running', reportData: rep,
+      });
+    } catch (dbErr) {
+      log.warn('Incremental save failed:', dbErr.message);
+    }
+  };
+
+  try {
+    const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, onUpdate, urls);
+    if (report) {
+      report.userId = userId;
+      await Report.upsertReport({
+        testId, userId,
+        frontendUrl: report.frontendUrl || frontendUrl,
+        backendUrl: report.backendUrl || backendUrl || null,
+        testDate: report.testDate || new Date().toISOString(),
+        overallScore: report.overallScore || 0,
+        totalPages: report.totalPages || 0,
+        status: report.status || 'complete',
+        reportData: report,
+      });
+    }
+    await scanStore.setStatus(testId, 'complete');
+    log.ok(`Scan ${testId} complete (score ${report?.overallScore ?? 0}).`);
+  } catch (err) {
+    log.error(`Scan ${testId} failed:`, err.message);
+    await scanStore.setStatus(testId, 'error', err.message);
+    postEvent({ type: 'test-error', testId, error: err.message });
+  }
+}
+
+function startHealthServer() {
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, service: 'worker' }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  // The health endpoint is optional — a port clash must NOT crash the worker.
+  srv.on('error', (err) => {
+    log.warn(`Health server not started on ${config.ports.workerHealth} (${err.code}); worker still running.`);
+  });
+  srv.listen(config.ports.workerHealth, () =>
+    log.info(`Health on http://127.0.0.1:${config.ports.workerHealth}/health`)
+  );
 }
 
 async function start() {
-  await queue.work(config.queues.discovery, { concurrency: config.concurrency.discovery }, handleDiscovery);
-  await queue.work(config.queues.pageTest, { concurrency: config.concurrency.pageTest }, handlePageTest);
+  // One scan at a time per worker by default (each scan runs a full browser).
+  await queue.work(config.queues.scan, { concurrency: config.concurrency.scan }, handleScan);
   startHealthServer();
-  log.ok('Worker ready (discovery + page-test consumers running).');
+  log.ok('Drop-in worker ready (scan consumer running — full runWebsiteTest engine).');
 
   const shutdown = async () => {
     log.info('Shutting down worker...');
-    try {
-      if (browser) await browser.close();
-    } catch (_) {}
     await queue.stop();
     process.exit(0);
   };

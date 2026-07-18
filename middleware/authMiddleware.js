@@ -135,5 +135,124 @@ async function verifyGoogleToken(req, res, next) {
     }
 }
 
-module.exports = { verifyGoogleToken, generateSessionToken };
+/**
+ * Middleware to verify if user has at least 1 credit remaining.
+ */
+async function checkCredits(req, res, next) {
+    const userId = req.userId;
+    if (!userId) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: Authentication required.' });
+    }
+
+    try {
+        const { pool } = require('../config/db');
+        const userRes = await pool.query('SELECT credits, subscription_tier FROM users WHERE id = $1', [userId]);
+
+        if (userRes.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'User profile not found.' });
+        }
+
+        const { credits, subscription_tier } = userRes.rows[0];
+        
+        // Free plan URL count safety check
+        if (subscription_tier === 'Free') {
+            const totalUrlsRes = await pool.query(
+                "SELECT COALESCE(SUM(total_pages), 0)::int as count FROM reports WHERE user_id = $1 AND status != 'failed'",
+                [userId]
+            );
+            const totalUrlsTested = totalUrlsRes.rows[0].count || 0;
+            if (totalUrlsTested >= 5) {
+                await pool.query("UPDATE users SET credits = 0 WHERE id = $1", [userId]);
+                return res.status(402).json({
+                    success: false,
+                    error: 'Payment Required: Insufficient scan credits. Please purchase credits or upgrade your plan.',
+                    code: 'CREDITS_EXHAUSTED'
+                });
+            }
+        }
+
+        // 1. Core Credits Check
+        if (credits <= 0) {
+            return res.status(402).json({
+                success: false,
+                error: 'Payment Required: Insufficient scan credits. Please purchase credits or upgrade your plan.',
+                code: 'CREDITS_EXHAUSTED'
+            });
+        }
+
+        // 2. Plan Limits Enforcements (only for PAID plans — Free plan is governed by the 5-URL ceiling above)
+        if (subscription_tier && subscription_tier !== 'Free') {
+            const PLAN_LIMITS = {
+                'Basic':    { domains: 20,  scans: 200   },
+                'Pro':      { domains: 50,  scans: 1500  },
+                'Business': { domains: 100, scans: 10000 },
+            };
+
+            const limits = PLAN_LIMITS[subscription_tier] || PLAN_LIMITS['Basic'];
+
+            // Monthly scan count check
+            const monthScansRes = await pool.query(
+                `SELECT COUNT(*)::int as count FROM reports WHERE user_id = $1 AND test_date >= date_trunc('month', CURRENT_DATE)`,
+                [userId]
+            );
+            const currentMonthScans = monthScansRes.rows[0].count || 0;
+
+            if (currentMonthScans >= limits.scans) {
+                return res.status(403).json({
+                    success: false,
+                    error: `Plan Limit Exceeded: You have used ${currentMonthScans}/${limits.scans} monthly scans for your ${subscription_tier} plan. Please upgrade to run more scans.`,
+                    code: 'SCAN_LIMIT_EXHAUSTED'
+                });
+            }
+
+            // Domain Limits check
+            const domainsRes = await pool.query(
+                `SELECT COUNT(DISTINCT (
+                  CASE 
+                    WHEN frontend_url LIKE 'http%' THEN 
+                      replace(split_part(frontend_url, '/', 3), 'www.', '')
+                    ELSE 
+                      replace(frontend_url, 'www.', '')
+                  END
+                ))::int as count FROM reports WHERE user_id = $1`,
+                [userId]
+            );
+            const uniqueDomainsCount = domainsRes.rows[0].count || 0;
+
+            const targetUrl = req.body.frontendUrl;
+            if (targetUrl) {
+                let targetDomain = '';
+                try {
+                    const cleanUrl = targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl;
+                    const u = new URL(cleanUrl);
+                    targetDomain = u.hostname.replace('www.', '');
+                } catch (e) {}
+
+                if (targetDomain) {
+                    const domainCheckRes = await pool.query(
+                        `SELECT 1 FROM reports WHERE user_id = $1 AND frontend_url LIKE $2 LIMIT 1`,
+                        [userId, `%${targetDomain}%`]
+                    );
+                    const isExistingDomain = domainCheckRes.rows.length > 0;
+
+                    if (!isExistingDomain && uniqueDomainsCount >= limits.domains) {
+                        return res.status(403).json({
+                            success: false,
+                            error: `Plan Limit Exceeded: You have reached the unique domain limit of ${uniqueDomainsCount}/${limits.domains} on your ${subscription_tier} plan. Please upgrade to scan new domains.`,
+                            code: 'DOMAIN_LIMIT_EXHAUSTED'
+                        });
+                    }
+                }
+            }
+        }
+
+        next();
+
+    } catch (err) {
+        console.error('Error verifying user credits and limits:', err.message);
+        res.status(500).json({ success: false, error: 'Server error: ' + err.message });
+    }
+}
+
+module.exports = { verifyGoogleToken, generateSessionToken, checkCredits };
 

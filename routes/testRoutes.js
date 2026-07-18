@@ -6,7 +6,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { verifyGoogleToken, generateSessionToken } = require('../middleware/authMiddleware');
+const { verifyGoogleToken, generateSessionToken, checkCredits } = require('../middleware/authMiddleware');
 const {
   getHealth,
   getLiveTestStatus,
@@ -17,12 +17,22 @@ const {
   testLegacy,
   groqAnalyze,
   scanDomain,
-  getScanStatus
+  getScanStatus,
+  deleteReport
 } = require('../controllers/reportController');
+
+const {
+  runAiAudit,
+  getAiIssues,
+  updateIssueStatus,
+  verifyIssue
+} = require('../controllers/aiAuditController');
+
+const { scanBrokenLinks } = require('../controllers/brokenLinkController');
 
 // REST API Endpoints
 router.get('/health', getHealth);
-router.get('/test/:testId', getLiveTestStatus);
+router.get('/test/:testId', verifyGoogleToken, getLiveTestStatus);
 router.post('/login', verifyGoogleToken, (req, res) => {
   const sessionToken = generateSessionToken({
     id: req.userId,
@@ -42,15 +52,26 @@ router.post('/login', verifyGoogleToken, (req, res) => {
     }
   });
 });
-router.post('/start-test', verifyGoogleToken, startTest);
+router.post('/start-test', verifyGoogleToken, checkCredits, startTest);
 router.post('/scan-domain', verifyGoogleToken, scanDomain);
 router.get('/scan-status/:jobId', verifyGoogleToken, getScanStatus);
 router.get('/reports', verifyGoogleToken, getReports);
 router.get('/reports/:testId/pages', verifyGoogleToken, getReportPages);
 router.get('/reports/:testId', verifyGoogleToken, getReport);
+router.delete('/reports/:testId', verifyGoogleToken, deleteReport);
 
 // Legacy/Auxiliary routes
-router.post('/test', testLegacy);
-router.post('/groq-analyze', groqAnalyze);
+router.post('/test', verifyGoogleToken, testLegacy);
+router.post('/groq-analyze', verifyGoogleToken, groqAnalyze);
+
+// Scan Page — on-demand broken-link scanner for a single URL
+router.post('/scan-page', verifyGoogleToken, scanBrokenLinks);
+
+// ── AI Audit routes (new — modular, backward-compatible) ──────
+router.post('/ai-audit', verifyGoogleToken, runAiAudit);
+router.get('/ai-issues/:testId', verifyGoogleToken, getAiIssues);
+router.patch('/ai-issues/:issueId', verifyGoogleToken, updateIssueStatus);
+router.post('/ai-verify/:issueId', verifyGoogleToken, verifyIssue);
 
 module.exports = router;
+

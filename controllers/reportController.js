@@ -41,6 +41,11 @@ function getLiveTestStatus(req, res) {
     return res.status(404).json({ success: false, error: 'Test not found' });
   }
 
+  // ✅ SECURITY: Ensure the requesting user owns this test
+  if (test.userId && test.userId !== req.userId) {
+    return res.status(403).json({ success: false, error: 'Access denied. This test belongs to another user.' });
+  }
+
   res.json({ success: true, ...test });
 }
 
@@ -83,6 +88,14 @@ async function startTest(req, res) {
     const broadcast = req.app.get('broadcastUpdate');
 
     console.log(`\n📨 New test request: ${frontendUrl} [TestID: ${testId}]`);
+
+    // Deduct 1 credit from user and log to ledger
+    const { pool } = require('../config/db');
+    await pool.query('UPDATE users SET credits = credits - 1 WHERE id = $1', [userId]);
+    await pool.query(
+      'INSERT INTO credit_transactions (user_id, amount, description) VALUES ($1, -1, $2)',
+      [userId, `Scan initiated for URL: ${frontendUrl}`]
+    );
 
     // Return immediately to the client
     res.json({
@@ -127,9 +140,26 @@ async function startTest(req, res) {
     };
     activeTests.set(testId, activeTestState);
 
+    // Initialize report immediately in the database to prevent null state on page reload
+    try {
+      await Report.upsertReport({
+        testId,
+        userId,
+        frontendUrl,
+        backendUrl: backendUrl || null,
+        testDate: activeTestState.report.testDate,
+        overallScore: activeTestState.report.overallScore,
+        totalPages: activeTestState.report.totalPages,
+        status: 'running',
+        reportData: activeTestState.report
+      });
+    } catch (dbInitErr) {
+      console.error('⚠️ Failed to initialize report in database:', dbInitErr.message);
+    }
+
     // Run Playwright scan test in background
     try {
-      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userDetails, async (update) => {
+      const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, async (update) => {
         // Broadcast updates to WebSocket client
         broadcast({ ...update, testId });
 
@@ -137,6 +167,43 @@ async function startTest(req, res) {
           const state = activeTests.get(testId);
           if (state && state.report) {
             const rep = state.report;
+
+            // Accumulate logs in memory for restoration on refresh
+            if (!rep.statusLogs) rep.statusLogs = [];
+            const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+            const logType = update.type === 'page-error' || update.type === 'test-error' ? 'error' :
+                            (update.type === 'ai-analyzing' || update.type === 'groq-status' ? 'ai' : 
+                             (update.type === 'page-complete' || update.type === 'test-complete' ? 'success' : 'info'));
+            
+            let logMessage = '';
+            if (update.message) {
+              logMessage = update.message;
+            } else if (update.type === 'links-discovered') {
+              logMessage = `Discovered ${update.totalPages} pages (${update.headerLinks} header, ${update.footerLinks} footer)`;
+            } else if (update.type === 'page-start') {
+              logMessage = `Testing page ${update.pageIndex + 1}/${update.totalPages}: ${update.text || update.url}`;
+            } else if (update.type === 'screenshot-taken') {
+              logMessage = `📸 Screenshot captured: ${update.url}`;
+            } else if (update.type === 'ai-analyzing') {
+              logMessage = `🤖 AI analyzing page ${update.pageIndex + 1}...`;
+            } else if (update.type === 'ai-complete') {
+              logMessage = `✅ AI analysis complete for page ${update.pageIndex + 1}`;
+            }
+
+            if (logMessage) {
+              rep.statusLogs.push({
+                id: rep.statusLogs.length + 1,
+                message: logMessage,
+                type: logType,
+                time
+              });
+            }
+
+            if (update.type === 'live-screenshot') {
+              rep.latestLiveScreenshot = `data:image/png;base64,${update.image}`;
+              rep.latestLiveUrl = update.url;
+            }
+
             if (update.type === 'links-discovered') {
               rep.totalPages = update.totalPages;
               rep.headerLinks = update.headerLinks || [];
@@ -157,8 +224,12 @@ async function startTest(req, res) {
                 screenshotUrl: result.screenshotUrl,
                 desktopScreenshotUrl: result.desktopScreenshotUrl || result.screenshotUrl,
                 mobileScreenshotUrl: result.mobileScreenshotUrl || '',
+                indexStatus: result.indexStatus || 'unknown',
+                robots: result.robots || null,
                 consoleErrors: result.consoleErrors || [],
                 networkErrors: result.networkErrors || [],
+                // ✅ FIX: networkLog was missing — Network Activity was not showing in new scans
+                networkLog: result.networkLog || { requests: [], summary: { totalRequests: 0, totalSize: 0, totalTransferred: 0, domContentLoaded: 0, loadTime: 0, finishTime: 0 } },
                 elementsInfo: result.elementsInfo || {},
                 brokenLinksCheck: result.brokenLinksCheck || [],
                 imageCheckResults: result.imageCheckResults || [],
@@ -185,17 +256,54 @@ async function startTest(req, res) {
                 : 0;
 
               // Save incremental report to database
-              await Report.upsertReport({
-                testId,
-                userId,
-                frontendUrl,
-                backendUrl: backendUrl || null,
-                testDate: rep.testDate,
-                overallScore: rep.overallScore,
-                totalPages: rep.totalPages,
-                status: 'running',
-                reportData: rep
-              });
+              try {
+                if (result.groqAnalysis && result.groqAnalysis.auditResult && Array.isArray(result.groqAnalysis.auditResult.issues)) {
+                  const auditIssues = result.groqAnalysis.auditResult.issues;
+                  const { pool } = require('../config/db');
+                  console.log(`🤖 [reportController] Auto-saving ${auditIssues.length} AI issues for page ${result.url}...`);
+                  
+                  // Delete existing issues for this page in this test run to prevent duplication
+                  await pool.query(
+                    'DELETE FROM ai_issues WHERE test_id = $1 AND page_url = $2',
+                    [testId, result.url]
+                  );
+
+                  if (auditIssues.length > 0) {
+                    const highestSeverity = auditIssues.some(i => i.severity === 'Critical') ? 'Critical' :
+                                            (auditIssues.some(i => i.severity === 'High') ? 'High' :
+                                            (auditIssues.some(i => i.severity === 'Medium') ? 'Medium' : 'Low'));
+                    
+                    let consolidatedTitle = "Complete Page Quality & UI/UX Audit";
+                    let consolidatedDesc = "";
+                    let consolidatedFix = "";
+
+                    if (auditIssues.length === 1 && (auditIssues[0].description || '').includes('-')) {
+                      consolidatedTitle = auditIssues[0].title || consolidatedTitle;
+                      consolidatedDesc = auditIssues[0].description;
+                      consolidatedFix = auditIssues[0].recommendedFix || auditIssues[0].recommended_fix || "";
+                    } else {
+                      consolidatedDesc = auditIssues.map(item => `- ${item.title}: ${item.description}`).join('\n');
+                      consolidatedFix = auditIssues.map(item => `- ${item.title}: ${item.recommendedFix || item.recommended_fix || ''}`).join('\n');
+                    }
+
+                    await pool.query(
+                      `INSERT INTO ai_issues
+                         (test_id, user_id, page_url, title, description, recommended_fix, priority, status, category, affected_element, confidence_score, ai_raw_response)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,'open','UI/UX','Entire Page','95%',$8)`,
+                      [
+                        testId, userId, result.url,
+                        consolidatedTitle,
+                        consolidatedDesc,
+                        consolidatedFix,
+                        highestSeverity,
+                        JSON.stringify(auditIssues)
+                      ]
+                    );
+                  }
+                }
+              } catch (saveErr) {
+                console.error('⚠️ Failed to auto-save AI issues:', saveErr.message);
+              }
             } else if (update.type === 'page-error') {
               rep.pagesCompleted = update.pageIndex + 1;
               const pageData = {
@@ -222,18 +330,20 @@ async function startTest(req, res) {
               } else {
                 rep.pages.push(pageData);
               }
-              await Report.upsertReport({
-                testId,
-                userId,
-                frontendUrl,
-                backendUrl: backendUrl || null,
-                testDate: rep.testDate,
-                overallScore: rep.overallScore,
-                totalPages: rep.totalPages,
-                status: 'running',
-                reportData: rep
-              });
             }
+
+            // Save incremental report on every update
+            await Report.upsertReport({
+              testId,
+              userId,
+              frontendUrl,
+              backendUrl: backendUrl || null,
+              testDate: rep.testDate,
+              overallScore: rep.overallScore,
+              totalPages: rep.totalPages,
+              status: 'running',
+              reportData: rep
+            });
           }
         } catch (dbErr) {
           console.error('⚠️ Failed to save incremental update to PostgreSQL:', dbErr.message);
@@ -417,6 +527,10 @@ async function getReportPages(req, res) {
     }
     try {
       const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+      // ✅ SECURITY: Verify ownership even in filesystem fallback
+      if (report.userId && report.userId !== userId) {
+        return res.status(403).json({ success: false, error: 'Access denied. This report belongs to another user.' });
+      }
       const allPages = report.pages || [];
       const offset = (page - 1) * limit;
       return res.json({
@@ -676,6 +790,34 @@ async function getScanStatus(req, res) {
   }
 }
 
+async function deleteReport(req, res) {
+  const { testId } = req.params;
+  const userId = req.userId;
+
+  try {
+    // 1. Delete from ai_issues table
+    await pool.query('DELETE FROM ai_issues WHERE test_id = $1 AND user_id = $2', [testId, userId]);
+
+    // 2. Delete from reports table
+    const deleteRes = await pool.query('DELETE FROM reports WHERE test_id = $1 AND user_id = $2 RETURNING *', [testId, userId]);
+
+    // 3. Delete from filesystem if fallback files exist
+    const reportDir = path.join(__dirname, '..', 'reports', testId);
+    if (fs.existsSync(reportDir)) {
+      fs.rmSync(reportDir, { recursive: true, force: true });
+    }
+
+    if (deleteRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Report not found or access denied.' });
+    }
+
+    return res.json({ success: true, message: 'Report deleted successfully.' });
+  } catch (err) {
+    console.error('Error deleting report:', err.message);
+    res.status(500).json({ success: false, error: 'Server error: ' + err.message });
+  }
+}
+
 module.exports = {
   getHealth,
   getLiveTestStatus,
@@ -686,5 +828,6 @@ module.exports = {
   testLegacy,
   groqAnalyze,
   scanDomain,
-  getScanStatus
+  getScanStatus,
+  deleteReport
 };
