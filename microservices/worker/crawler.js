@@ -9,7 +9,7 @@
  * ============================================================
  */
 
-const { discoverDomainUrls } = require('../../playwrightTester');
+const { discoverDomainUrls } = require('../../utils/pythonBridge');
 
 /**
  * @returns {Promise<{urls: Array<{url,text,source}>, headerLinks, footerLinks}>}

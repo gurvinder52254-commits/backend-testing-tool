@@ -18,7 +18,7 @@
 const path   = require('path');
 const fs     = require('fs');
 const fetch  = require('node-fetch');
-const { chromium } = require('playwright');
+const { takeScreenshot } = require('../utils/pythonBridge');
 const { pool }     = require('../config/db');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -144,23 +144,8 @@ function formatSteps(steps) {
   return steps ? String(steps) : '';
 }
 
-// ── Screenshot helper ─────────────────────────────────────────
-async function takeScreenshot(pageUrl, outputPath) {
-  let browser = null;
-  try {
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-    const ctx  = await browser.newContext({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
-    const page = await ctx.newPage();
-    await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() =>
-      page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
-    );
-    await page.waitForTimeout(2000);
-    await page.screenshot({ path: outputPath, fullPage: true });
-    return true;
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
-}
+// takeScreenshot is imported from ../utils/pythonBridge
+
 
 // ── Audit prompt ──────────────────────────────────────────────
 const AUDIT_SYSTEM_PROMPT = `You are an expert UI/UX auditor and web accessibility consultant.

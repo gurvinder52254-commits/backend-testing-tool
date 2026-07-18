@@ -83,8 +83,154 @@ app.post('/internal/broadcast', (req, res) => {
   if (!isLocal) {
     return res.status(403).json({ error: 'Forbidden: internal endpoint only' });
   }
-  broadcastUpdate(req.body || {});
+  const update = req.body || {};
+  broadcastUpdate(update);
   res.json({ ok: true });
+
+  const { testId } = update;
+  if (testId) {
+    (async () => {
+      try {
+        const { pool } = require('../../config/db');
+        const dbRes = await pool.query('SELECT user_id, report_data, status FROM reports WHERE test_id = $1', [testId]);
+        if (dbRes.rows.length > 0) {
+          const row = dbRes.rows[0];
+          const rep = row.report_data || {};
+          const dbUserId = row.user_id;
+
+          const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+          const logType = update.type === 'page-error' || update.type === 'test-error' ? 'error' :
+                          (update.type === 'ai-analyzing' || update.type === 'groq-status' ? 'ai' : 
+                           (update.type === 'page-complete' || update.type === 'test-complete' ? 'success' : 'info'));
+          
+          let logMessage = '';
+          if (update.message) {
+            logMessage = update.message;
+          } else if (update.type === 'links-discovered') {
+            logMessage = `Discovered ${update.totalPages} pages (${update.headerLinks || 0} header, ${update.footerLinks || 0} footer)`;
+          } else if (update.type === 'page-start') {
+            logMessage = `Testing page ${update.pageIndex + 1}/${update.totalPages}: ${update.text || update.url}`;
+          } else if (update.type === 'screenshot-taken') {
+            logMessage = `📸 Screenshot captured: ${update.url}`;
+          } else if (update.type === 'ai-analyzing') {
+            logMessage = `🤖 AI analyzing page ${update.pageIndex + 1}...`;
+          } else if (update.type === 'ai-complete') {
+            logMessage = `✅ AI analysis complete for page ${update.pageIndex + 1}`;
+          }
+
+          if (logMessage) {
+            if (!rep.statusLogs) rep.statusLogs = [];
+            rep.statusLogs.push({
+              id: rep.statusLogs.length + 1,
+              message: logMessage,
+              type: logType,
+              time
+            });
+          }
+
+          if (update.type === 'live-screenshot') {
+            rep.latestLiveScreenshot = `data:image/png;base64,${update.image}`;
+            rep.latestLiveUrl = update.url;
+          }
+
+          if (update.type === 'links-discovered') {
+            rep.totalPages = update.totalPages;
+            rep.headerLinks = update.headerLinks || [];
+            rep.footerLinks = update.footerLinks || [];
+          } else if (update.type === 'page-complete') {
+            rep.pagesCompleted = update.pageIndex + 1;
+            const result = update.result;
+            if (result) {
+              const pageData = {
+                index: update.pageIndex,
+                url: result.url,
+                title: result.title,
+                text: result.title || '',
+                source: result.source || 'body',
+                loadStatus: result.loadStatus,
+                loadTimeMs: result.loadTimeMs || 0,
+                httpStatus: result.httpStatus || 200,
+                screenshotUrl: result.screenshotUrl,
+                desktopScreenshotUrl: result.desktopScreenshotUrl || result.screenshotUrl,
+                mobileScreenshotUrl: result.mobileScreenshotUrl || '',
+                indexStatus: result.indexStatus || 'unknown',
+                robots: result.robots || null,
+                consoleErrors: result.consoleErrors || [],
+                networkErrors: result.networkErrors || [],
+                networkLog: result.networkLog || { requests: [], summary: { totalRequests: 0, totalSize: 0, totalTransferred: 0, domContentLoaded: 0, loadTime: 0, finishTime: 0 } },
+                elementsInfo: result.elementsInfo || {},
+                brokenLinksCheck: result.brokenLinksCheck || [],
+                imageCheckResults: result.imageCheckResults || [],
+                videoCheckResults: result.videoCheckResults || [],
+                aiAnalysis: result.aiAnalysis,
+                groqAnalysis: result.groqAnalysis,
+                error: result.error || null
+              };
+
+              if (!rep.pages) rep.pages = [];
+              const existingIdx = rep.pages.findIndex(p => p.url === result.url);
+              if (existingIdx >= 0) {
+                rep.pages[existingIdx] = pageData;
+              } else {
+                rep.pages.push(pageData);
+              }
+
+              rep.globalSummary = rep.globalSummary || { totalErrors: 0 };
+              rep.globalSummary.totalErrors = rep.pages.reduce((sum, p) => sum + (p.consoleErrors || []).length + (p.networkErrors || []).length, 0);
+
+              const scores = rep.pages
+                .filter((p) => p.aiAnalysis && p.aiAnalysis.overallScore > 0)
+                .map((p) => p.aiAnalysis.overallScore);
+              rep.overallScore = scores.length > 0
+                ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length)
+                : 0;
+            }
+          } else if (update.type === 'page-error') {
+            rep.pagesCompleted = update.pageIndex + 1;
+            const pageData = {
+              index: update.pageIndex,
+              url: update.url,
+              title: 'Error',
+              text: 'Error',
+              source: 'error',
+              loadStatus: 'ERROR',
+              loadTimeMs: 0,
+              httpStatus: 500,
+              screenshotUrl: '',
+              consoleErrors: [],
+              networkErrors: [],
+              elementsInfo: {},
+              brokenLinksCheck: [],
+              imageCheckResults: [],
+              videoCheckResults: [],
+              error: update.error
+            };
+            if (!rep.pages) rep.pages = [];
+            const existingIdx = rep.pages.findIndex(p => p.url === update.url);
+            if (existingIdx >= 0) {
+              rep.pages[existingIdx] = pageData;
+            } else {
+              rep.pages.push(pageData);
+            }
+          }
+
+          await Report.upsertReport({
+            testId,
+            userId: dbUserId,
+            frontendUrl: rep.frontendUrl || '',
+            backendUrl: rep.backendUrl || null,
+            testDate: rep.testDate || new Date().toISOString(),
+            overallScore: rep.overallScore || 0,
+            totalPages: rep.totalPages || 0,
+            status: update.type === 'test-complete' ? 'complete' : (row.status || 'running'),
+            reportData: rep
+          });
+        }
+      } catch (err) {
+        log.error(`Failed to process broadcast updates for database: ${err.message}`);
+      }
+    })();
+  }
 });
 
 // ============================================================

@@ -22,7 +22,7 @@ const config = require('../shared/config'); // loads dotenv FIRST
 const { createLogger } = require('../shared/logger');
 const queue = require('../shared/queue');
 const scanStore = require('../shared/scanStore');
-const { runWebsiteTest } = require('../../playwrightTester');
+const { runWebsiteTest } = require('../../utils/pythonBridge');
 const Report = require('../../models/Report');
 
 const log = createLogger('worker');
@@ -201,6 +201,21 @@ async function handleScan(data) {
     const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, onUpdate, urls);
     if (report) {
       report.userId = userId;
+
+      // Preserve live screenshots and logs from intermediate DB updates
+      try {
+        const { pool } = require('../../config/db');
+        const existingRes = await pool.query('SELECT report_data FROM reports WHERE test_id = $1', [testId]);
+        if (existingRes.rows.length > 0) {
+          const existingReportData = existingRes.rows[0].report_data || {};
+          report.latestLiveScreenshot = existingReportData.latestLiveScreenshot || null;
+          report.latestLiveUrl = existingReportData.latestLiveUrl || null;
+          report.statusLogs = existingReportData.statusLogs || [];
+        }
+      } catch (err) {
+        log.warn('Failed to retrieve existing live details for preservation:', err.message);
+      }
+
       await Report.upsertReport({
         testId, userId,
         frontendUrl: report.frontendUrl || frontendUrl,
