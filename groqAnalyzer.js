@@ -24,22 +24,68 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 function sanitizeJsonString(raw) {
     if (!raw) return '';
 
-    // 1. Remove markdown code blocks
-    let clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+    // 1. Remove markdown code blocks and reasoning thinking blocks
+    let clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '')
+        .replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-    // 2. Extract only the first { ... } or [ ... ] block
-    const jsonMatch = clean.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (!jsonMatch) return clean;
-    clean = jsonMatch[0];
+    // 2. Extract only the first valid { ... } or [ ... ] block using bracket counting
+    let startChar = '';
+    let endChar = '';
+    let startIndex = -1;
+
+    for (let i = 0; i < clean.length; i++) {
+        if (clean[i] === '{') {
+            startChar = '{';
+            endChar = '}';
+            startIndex = i;
+            break;
+        } else if (clean[i] === '[') {
+            startChar = '[';
+            endChar = ']';
+            startIndex = i;
+            break;
+        }
+    }
+
+    if (startIndex !== -1) {
+        let bracketCount = 0;
+        let inString = false;
+        let escape = false;
+
+        for (let i = startIndex; i < clean.length; i++) {
+            const char = clean[i];
+
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (char === '\\') {
+                escape = true;
+                continue;
+            }
+            if (char === '"') {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString) {
+                if (char === startChar) {
+                    bracketCount++;
+                } else if (char === endChar) {
+                    bracketCount--;
+                    if (bracketCount === 0) {
+                        clean = clean.substring(startIndex, i + 1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // 3. Fix unescaped backslashes: 
-    // A backslash is invalid in JSON unless followed by " \ / b f n r t uXXXX
-    // We look for backslashes NOT followed by one of those and escape them.
-    // This is tricky; a simpler approach is to fix common "bad" escapes like \( \) \. \* 
-    // which the AI often includes when writing selectors or regex.
     clean = clean.replace(/\\([^"\\\/bfnrtu])/g, '\\\\$1');
 
-    // 4. Remove trailing commas in objects/arrays (some parsers hate this)
+    // 4. Remove trailing commas in objects/arrays
     clean = clean.replace(/,\s*([\}\]])/g, '$1');
 
     return clean;
@@ -89,7 +135,7 @@ async function callGroqVision(base64Image, prompt, maxTokens = 4096, retryCount 
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+                model: 'qwen/qwen3.6-27b',
                 messages: [
                     {
                         role: 'user',
@@ -293,7 +339,7 @@ Generate test cases that cover all critical functionality. Return ONLY valid JSO
     "summary": "<1-2 sentence summary of test coverage>"
 }`;
 
-        const responseText = await callGroqVision(base64Image, prompt, 6000);
+        const responseText = await callGroqVision(base64Image, prompt, 1500);
 
         const cleanJson = sanitizeJsonString(responseText);
 
@@ -355,7 +401,7 @@ Return ONLY valid JSON (no markdown, no code blocks):
     ]
 }`;
 
-        const responseText = await callGroqVision(base64Image, prompt, 8000);
+        const responseText = await callGroqVision(base64Image, prompt, 2048);
 
         const cleanJson = sanitizeJsonString(responseText);
 
@@ -621,8 +667,8 @@ Rules:
 
         // Send the SAME image in two identical requests for cross-verification.
         const [rA, rB] = await Promise.allSettled([
-            callGroqVision(base64Image, prompt, 6000),
-            callGroqVision(base64Image, prompt, 6000),
+            callGroqVision(base64Image, prompt, 1500),
+            callGroqVision(base64Image, prompt, 1500),
         ]);
 
         const issuesA = parsePass(rA);

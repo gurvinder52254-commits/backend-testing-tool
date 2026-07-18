@@ -140,6 +140,23 @@ async function startTest(req, res) {
     };
     activeTests.set(testId, activeTestState);
 
+    // Initialize report immediately in the database to prevent null state on page reload
+    try {
+      await Report.upsertReport({
+        testId,
+        userId,
+        frontendUrl,
+        backendUrl: backendUrl || null,
+        testDate: activeTestState.report.testDate,
+        overallScore: activeTestState.report.overallScore,
+        totalPages: activeTestState.report.totalPages,
+        status: 'running',
+        reportData: activeTestState.report
+      });
+    } catch (dbInitErr) {
+      console.error('⚠️ Failed to initialize report in database:', dbInitErr.message);
+    }
+
     // Run Playwright scan test in background
     try {
       const report = await runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId, userDetails, async (update) => {
@@ -150,6 +167,43 @@ async function startTest(req, res) {
           const state = activeTests.get(testId);
           if (state && state.report) {
             const rep = state.report;
+
+            // Accumulate logs in memory for restoration on refresh
+            if (!rep.statusLogs) rep.statusLogs = [];
+            const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+            const logType = update.type === 'page-error' || update.type === 'test-error' ? 'error' :
+                            (update.type === 'ai-analyzing' || update.type === 'groq-status' ? 'ai' : 
+                             (update.type === 'page-complete' || update.type === 'test-complete' ? 'success' : 'info'));
+            
+            let logMessage = '';
+            if (update.message) {
+              logMessage = update.message;
+            } else if (update.type === 'links-discovered') {
+              logMessage = `Discovered ${update.totalPages} pages (${update.headerLinks} header, ${update.footerLinks} footer)`;
+            } else if (update.type === 'page-start') {
+              logMessage = `Testing page ${update.pageIndex + 1}/${update.totalPages}: ${update.text || update.url}`;
+            } else if (update.type === 'screenshot-taken') {
+              logMessage = `📸 Screenshot captured: ${update.url}`;
+            } else if (update.type === 'ai-analyzing') {
+              logMessage = `🤖 AI analyzing page ${update.pageIndex + 1}...`;
+            } else if (update.type === 'ai-complete') {
+              logMessage = `✅ AI analysis complete for page ${update.pageIndex + 1}`;
+            }
+
+            if (logMessage) {
+              rep.statusLogs.push({
+                id: rep.statusLogs.length + 1,
+                message: logMessage,
+                type: logType,
+                time
+              });
+            }
+
+            if (update.type === 'live-screenshot') {
+              rep.latestLiveScreenshot = `data:image/png;base64,${update.image}`;
+              rep.latestLiveUrl = update.url;
+            }
+
             if (update.type === 'links-discovered') {
               rep.totalPages = update.totalPages;
               rep.headerLinks = update.headerLinks || [];
@@ -250,18 +304,6 @@ async function startTest(req, res) {
               } catch (saveErr) {
                 console.error('⚠️ Failed to auto-save AI issues:', saveErr.message);
               }
-
-              await Report.upsertReport({
-                testId,
-                userId,
-                frontendUrl,
-                backendUrl: backendUrl || null,
-                testDate: rep.testDate,
-                overallScore: rep.overallScore,
-                totalPages: rep.totalPages,
-                status: 'running',
-                reportData: rep
-              });
             } else if (update.type === 'page-error') {
               rep.pagesCompleted = update.pageIndex + 1;
               const pageData = {
@@ -288,18 +330,20 @@ async function startTest(req, res) {
               } else {
                 rep.pages.push(pageData);
               }
-              await Report.upsertReport({
-                testId,
-                userId,
-                frontendUrl,
-                backendUrl: backendUrl || null,
-                testDate: rep.testDate,
-                overallScore: rep.overallScore,
-                totalPages: rep.totalPages,
-                status: 'running',
-                reportData: rep
-              });
             }
+
+            // Save incremental report on every update
+            await Report.upsertReport({
+              testId,
+              userId,
+              frontendUrl,
+              backendUrl: backendUrl || null,
+              testDate: rep.testDate,
+              overallScore: rep.overallScore,
+              totalPages: rep.totalPages,
+              status: 'running',
+              reportData: rep
+            });
           }
         } catch (dbErr) {
           console.error('⚠️ Failed to save incremental update to PostgreSQL:', dbErr.message);

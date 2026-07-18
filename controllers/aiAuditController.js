@@ -32,7 +32,7 @@ async function callGroqVision(base64Image, systemPrompt, userPrompt, maxTokens =
   }
 
   const body = {
-    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    model: 'qwen/qwen3.6-27b',
     messages: [
       { role: 'system', content: systemPrompt },
       {
@@ -71,10 +71,63 @@ async function callGroqVision(base64Image, systemPrompt, userPrompt, maxTokens =
 // ── JSON extractor ────────────────────────────────────────────
 function extractJson(raw) {
   if (!raw) return null;
-  let text = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-  const m = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-  if (!m) return null;
-  text = m[0].replace(/,\s*([\}\]])/g, '$1');
+  let text = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '')
+                 .replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  let startChar = '';
+  let endChar = '';
+  let startIndex = -1;
+
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '{') {
+      startChar = '{';
+      endChar = '}';
+      startIndex = i;
+      break;
+    } else if (text[i] === '[') {
+      startChar = '[';
+      endChar = ']';
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex !== -1) {
+    let bracketCount = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = startIndex; i < text.length; i++) {
+      const char = text[i];
+
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === '\\') {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === startChar) {
+          bracketCount++;
+        } else if (char === endChar) {
+          bracketCount--;
+          if (bracketCount === 0) {
+            text = text.substring(startIndex, i + 1);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  text = text.replace(/,\s*([\}\]])/g, '$1');
   try { return JSON.parse(text); } catch { return null; }
 }
 

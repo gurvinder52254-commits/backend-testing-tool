@@ -74,12 +74,59 @@ async function handleScan(data) {
 
   const rep = freshReport(testId, frontendUrl, backendUrl);
 
+  // Initialize report immediately in the database to prevent null state on page reload
+  try {
+    await Report.upsertReport({
+      testId, userId, frontendUrl, backendUrl: backendUrl || null,
+      testDate: rep.testDate, overallScore: rep.overallScore,
+      totalPages: rep.totalPages, status: 'running', reportData: rep,
+    });
+  } catch (dbInitErr) {
+    log.warn('⚠️ Failed to initialize report in database:', dbInitErr.message);
+  }
+
   const onUpdate = async (update) => {
     // 1) live event → gateway WS
     postEvent({ ...update, testId });
 
     // 2) incremental persistence (same logic as the monolith controller)
     try {
+      // Accumulate logs in memory for restoration on refresh
+      if (!rep.statusLogs) rep.statusLogs = [];
+      const time = new Date().toLocaleTimeString('en-IN', { hour12: false });
+      const logType = update.type === 'page-error' || update.type === 'test-error' ? 'error' :
+                      (update.type === 'ai-analyzing' || update.type === 'groq-status' ? 'ai' : 
+                       (update.type === 'page-complete' || update.type === 'test-complete' ? 'success' : 'info'));
+      
+      let logMessage = '';
+      if (update.message) {
+        logMessage = update.message;
+      } else if (update.type === 'links-discovered') {
+        logMessage = `Discovered ${update.totalPages} pages (${update.headerLinks} header, ${update.footerLinks} footer)`;
+      } else if (update.type === 'page-start') {
+        logMessage = `Testing page ${update.pageIndex + 1}/${update.totalPages}: ${update.text || update.url}`;
+      } else if (update.type === 'screenshot-taken') {
+        logMessage = `📸 Screenshot captured: ${update.url}`;
+      } else if (update.type === 'ai-analyzing') {
+        logMessage = `🤖 AI analyzing page ${update.pageIndex + 1}...`;
+      } else if (update.type === 'ai-complete') {
+        logMessage = `✅ AI analysis complete for page ${update.pageIndex + 1}`;
+      }
+
+      if (logMessage) {
+        rep.statusLogs.push({
+          id: rep.statusLogs.length + 1,
+          message: logMessage,
+          type: logType,
+          time
+        });
+      }
+
+      if (update.type === 'live-screenshot') {
+        rep.latestLiveScreenshot = `data:image/png;base64,${update.image}`;
+        rep.latestLiveUrl = update.url;
+      }
+
       if (update.type === 'links-discovered') {
         rep.totalPages = update.totalPages;
         rep.headerLinks = update.headerLinks || [];
@@ -124,12 +171,6 @@ async function handleScan(data) {
           .filter((p) => p.aiAnalysis && p.aiAnalysis.overallScore > 0)
           .map((p) => p.aiAnalysis.overallScore);
         rep.overallScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
-
-        await Report.upsertReport({
-          testId, userId, frontendUrl, backendUrl: backendUrl || null,
-          testDate: rep.testDate, overallScore: rep.overallScore,
-          totalPages: rep.totalPages, status: 'running', reportData: rep,
-        });
       } else if (update.type === 'page-error') {
         rep.pagesCompleted = update.pageIndex + 1;
         const pageData = {
@@ -143,12 +184,14 @@ async function handleScan(data) {
         const idx = rep.pages.findIndex((p) => p.url === update.url);
         if (idx >= 0) rep.pages[idx] = pageData;
         else rep.pages.push(pageData);
-        await Report.upsertReport({
-          testId, userId, frontendUrl, backendUrl: backendUrl || null,
-          testDate: rep.testDate, overallScore: rep.overallScore,
-          totalPages: rep.totalPages, status: 'running', reportData: rep,
-        });
       }
+
+      // Save incremental report on every update
+      await Report.upsertReport({
+        testId, userId, frontendUrl, backendUrl: backendUrl || null,
+        testDate: rep.testDate, overallScore: rep.overallScore,
+        totalPages: rep.totalPages, status: 'running', reportData: rep,
+      });
     } catch (dbErr) {
       log.warn('Incremental save failed:', dbErr.message);
     }
