@@ -7,32 +7,92 @@
 const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
-const { verifyGoogleToken } = require('../middleware/authMiddleware');
+const crypto = require('crypto');
+const SESSION_SECRET = process.env.SESSION_SECRET || 'webtest_secret_default_key_123456';
 
-// Middleware to ensure user is an admin
-// For simple setups, we can check if their email matches a list of admin emails,
-// or we can allow the UI to handle it. Let's make a solid, custom check.
-async function checkAdmin(req, res, next) {
-    const adminEmails = (process.env.ADMIN_EMAILS || '')
-        .split(',')
-        .map(e => e.trim().toLowerCase())
-        .filter(Boolean);
+// Get admin credentials from env, or use defaults
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || 'admin@webtest.com').toLowerCase();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 
-    // Default fallback: allow the first user or anyone if no ADMIN_EMAILS are defined in development
-    if (adminEmails.length > 0) {
-        const userEmail = (req.userEmail || '').toLowerCase();
-        if (!adminEmails.includes(userEmail)) {
-            return res.status(403).json({
-                success: false,
-                error: 'Forbidden: Admin access only.'
-            });
-        }
-    }
-    next();
+function generateAdminToken(email) {
+    const expiry = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+    const payloadObj = {
+        isAdmin: true,
+        email: email,
+        expiry: expiry
+    };
+    const payload = Buffer.from(JSON.stringify(payloadObj)).toString('base64');
+    const hmac = crypto.createHmac('sha256', SESSION_SECRET);
+    hmac.update(payload);
+    const signature = hmac.digest('base64');
+    return `webtest_admin_${payload}.${signature}`;
 }
 
-// All admin endpoints require Google Token verification + Admin role check
-router.use(verifyGoogleToken, checkAdmin);
+function verifyAdminToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ success: false, error: 'Admin authentication required.' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    if (!token.startsWith('webtest_admin_')) {
+        return res.status(401).json({ success: false, error: 'Invalid admin token format' });
+    }
+
+    try {
+        const tokenParts = token.substring('webtest_admin_'.length).split('.');
+        if (tokenParts.length !== 2) {
+            throw new Error('Invalid token structure');
+        }
+        const [payload, signature] = tokenParts;
+        const hmac = crypto.createHmac('sha256', SESSION_SECRET);
+        hmac.update(payload);
+        const expectedSignature = hmac.digest('base64');
+
+        if (signature !== expectedSignature) {
+            throw new Error('Invalid token signature');
+        }
+
+        const payloadObj = JSON.parse(Buffer.from(payload, 'base64').toString('utf-8'));
+        if (Date.now() > payloadObj.expiry) {
+            return res.status(401).json({ success: false, error: 'Admin session expired. Please login again.' });
+        }
+
+        req.adminEmail = payloadObj.email;
+        next();
+    } catch (err) {
+        return res.status(401).json({ success: false, error: 'Invalid or expired admin session token.' });
+    }
+}
+
+/**
+ * POST /api/admin/login
+ * Standard email & password sign-in for admin panel
+ */
+router.post('/login', (req, res) => {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+        return res.status(400).json({ success: false, error: 'Email and password are required' });
+    }
+
+    if (email.toLowerCase() === ADMIN_EMAIL && password === ADMIN_PASSWORD) {
+        const token = generateAdminToken(email);
+        return res.json({
+            success: true,
+            token,
+            user: {
+                email: ADMIN_EMAIL,
+                name: 'System Administrator'
+            }
+        });
+    }
+
+    return res.status(401).json({ success: false, error: 'Invalid admin email or password' });
+});
+
+// Protect all other endpoints using verifyAdminToken middleware
+router.use(verifyAdminToken);
 
 /**
  * GET /api/admin/stats
