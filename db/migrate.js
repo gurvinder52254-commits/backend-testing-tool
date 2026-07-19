@@ -179,6 +179,18 @@ async function runMigrations() {
       );
     `);
 
+    // 6. Python Services Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS python_services (
+        id SERIAL PRIMARY KEY,
+        service_url TEXT NOT NULL UNIQUE,
+        is_dedicated BOOLEAN DEFAULT FALSE,
+        assigned_user_id VARCHAR(255) REFERENCES users(id) ON DELETE SET NULL,
+        status VARCHAR(50) DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     client.release();
 
     console.log('✅ DB Migration: Tables initialized successfully.');

@@ -755,7 +755,7 @@ async function scanDomain(req, res) {
 
     // Queue the job using the custom ScanQueue
     const job = scanQueue.addJob(async (data) => {
-      return await discoverDomainUrls(data.frontendUrl);
+      return await discoverDomainUrls(data.frontendUrl, req.userId);
     }, { frontendUrl });
 
     res.json({

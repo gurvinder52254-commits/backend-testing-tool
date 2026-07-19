@@ -192,6 +192,7 @@ app.post('/api/login', verifyGoogleToken, (req, res) => {
 const testRoutes = require('../routes/testRoutes');
 app.use('/api', testRoutes);
 app.use('/api/profile', require('../routes/profileRoutes'));
+app.use('/api/admin', require('../routes/adminRoutes'));
 
 app.get('/', (req, res) => {
   res.json({ message: '🚀 Website Testing Platform API v2.0 (Production)', status: 'OK', websocket: `ws://0.0.0.0:${PORT}/ws` });

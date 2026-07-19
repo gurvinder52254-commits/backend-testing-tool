@@ -227,7 +227,7 @@ async function runAiAudit(req, res) {
     const screenshotPath = path.join(screenshotDir, `${Date.now()}.png`);
 
     console.log(`🤖 [AI Audit] Taking screenshot of ${url}`);
-    await takeScreenshot(url, screenshotPath);
+    await takeScreenshot(url, screenshotPath, false, req.userId);
 
     // Call Groq Vision Page Audit
     const auditRes = await auditPageIssues(screenshotPath, url, 'Audited Page');
@@ -497,7 +497,7 @@ async function verifyIssue(req, res) {
     const screenshotPath = path.join(screenshotDir, `verify_${Date.now()}.png`);
 
     console.log(`🔍 [AI Verify] Re-screenshotting ${issue.page_url} for issue #${issueId}`);
-    await takeScreenshot(issue.page_url, screenshotPath);
+    await takeScreenshot(issue.page_url, screenshotPath, false, issue.user_id);
 
     const imgBase64 = fs.readFileSync(screenshotPath).toString('base64');
 

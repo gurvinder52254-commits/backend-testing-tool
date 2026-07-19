@@ -18,11 +18,61 @@ const _backendBase = process.env.PUBLIC_BACKEND_URL
 const INTERNAL_BROADCAST_URL = process.env.MS_INTERNAL_BROADCAST_URL || `${_backendBase}/internal/broadcast`;
 
 /**
+ * Resolves the appropriate Python service URL dynamically.
+ * - If user is Paid and has a dedicated service assigned, returns that dedicated URL.
+ * - Otherwise, load balances (randomly) across active non-dedicated services in the free pool.
+ * - Fallback to env-defined PYTHON_SERVICE_URL if no services registered in DB.
+ */
+async function resolvePythonServiceUrl(userId) {
+    try {
+        if (userId) {
+            // Check if user is paid
+            const userRes = await pool.query(
+                'SELECT subscription_tier FROM users WHERE id = $1',
+                [userId]
+            );
+            if (userRes.rows.length > 0) {
+                const tier = userRes.rows[0].subscription_tier || 'Free';
+                if (tier !== 'Free') {
+                    // Check if they have a dedicated active service assigned
+                    const serviceRes = await pool.query(
+                        "SELECT service_url FROM python_services WHERE assigned_user_id = $1 AND status = 'active' LIMIT 1",
+                        [userId]
+                    );
+                    if (serviceRes.rows.length > 0) {
+                        const url = serviceRes.rows[0].service_url;
+                        console.log(`[PythonBridge] Routing user ${userId} (${tier}) to dedicated instance: ${url}`);
+                        return url;
+                    }
+                }
+            }
+        }
+
+        // Get free pool active services
+        const poolRes = await pool.query(
+            "SELECT service_url FROM python_services WHERE is_dedicated = FALSE AND status = 'active'"
+        );
+        if (poolRes.rows.length > 0) {
+            const index = Math.floor(Math.random() * poolRes.rows.length);
+            const url = poolRes.rows[index].service_url;
+            console.log(`[PythonBridge] Routing to shared pool instance: ${url}`);
+            return url;
+        }
+    } catch (dbErr) {
+        console.warn('⚠️ pythonBridge: Error resolving python service from DB:', dbErr.message);
+    }
+
+    // Default fallback
+    return PYTHON_SERVICE_URL;
+}
+
+/**
  * Discover URLs using Python Playwright Crawler
  */
-async function discoverDomainUrls(frontendUrl) {
+async function discoverDomainUrls(frontendUrl, userId = null) {
     try {
-        const response = await fetch(`${PYTHON_SERVICE_URL}/api/discover`, {
+        const serviceUrl = await resolvePythonServiceUrl(userId);
+        const response = await fetch(`${serviceUrl}/api/discover`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ frontendUrl })
@@ -42,9 +92,10 @@ async function discoverDomainUrls(frontendUrl) {
 /**
  * Capture a screenshot using Python Playwright
  */
-async function takeScreenshot(pageUrl, outputPath, isMobile = false) {
+async function takeScreenshot(pageUrl, outputPath, isMobile = false, userId = null) {
     try {
-        const response = await fetch(`${PYTHON_SERVICE_URL}/api/screenshot`, {
+        const serviceUrl = await resolvePythonServiceUrl(userId);
+        const response = await fetch(`${serviceUrl}/api/screenshot`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ pageUrl, outputPath, isMobile })
@@ -102,9 +153,12 @@ async function runWebsiteTest(testId, frontendUrl, backendUrl, scanType, userId,
     // 3. Prepare test directory absolute path
     const testDir = path.join(__dirname, '..', 'reports', testId);
 
-    // 4. Send scan request to Python FastAPI Service
+    // 4. Resolve Python Service URL dynamically
+    const serviceUrl = await resolvePythonServiceUrl(userId);
+
+    // 5. Send scan request to Python FastAPI Service
     try {
-        const response = await fetch(`${PYTHON_SERVICE_URL}/api/scan`, {
+        const response = await fetch(`${serviceUrl}/api/scan`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

@@ -118,6 +118,7 @@ app.use('/api/screenshots', express.static(reportsDir));
 const testRoutes = require('./routes/testRoutes');
 app.use('/api', testRoutes);
 app.use('/api/profile', require('./routes/profileRoutes'));
+app.use('/api/admin', require('./routes/adminRoutes'));
 
 // Relay updates from Python service to WebSocket clients
 app.post('/internal/broadcast', (req, res) => {
