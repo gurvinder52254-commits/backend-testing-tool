@@ -317,6 +317,7 @@ app.post('/api/scan-page', verifyGoogleToken, scanBrokenLinks);
 
 // Profile and Credits route mounts
 app.use('/api/profile', require('../../routes/profileRoutes'));
+app.use('/api/admin', require('../../routes/adminRoutes'));
 
 // ── AI Audit routes — mirrored from monolith ──────────────────
 app.post('/api/ai-audit', verifyGoogleToken, aiAudit.runAiAudit);
