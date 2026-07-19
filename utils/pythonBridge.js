@@ -8,7 +8,14 @@ const LinkCache = require('../models/LinkCache');
 
 const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://127.0.0.1:8000';
 const GATEWAY_PORT = process.env.PORT || 3001;
-const INTERNAL_BROADCAST_URL = process.env.MS_INTERNAL_BROADCAST_URL || `http://127.0.0.1:${GATEWAY_PORT}/internal/broadcast`;
+
+// On Render, Python service is a DIFFERENT server — use public URL for webhook.
+// MS_INTERNAL_BROADCAST_URL overrides everything (set this on Render backend env).
+// PUBLIC_BACKEND_URL = e.g. https://backend-testing-tool.onrender.com
+const _backendBase = process.env.PUBLIC_BACKEND_URL
+  ? process.env.PUBLIC_BACKEND_URL.replace(/\/$/, '')
+  : `http://127.0.0.1:${GATEWAY_PORT}`;
+const INTERNAL_BROADCAST_URL = process.env.MS_INTERNAL_BROADCAST_URL || `${_backendBase}/internal/broadcast`;
 
 /**
  * Discover URLs using Python Playwright Crawler
