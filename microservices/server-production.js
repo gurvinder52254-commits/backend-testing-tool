@@ -76,7 +76,7 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
     cb(new Error(`CORS: Origin "${origin}" not allowed`));
   },
-  methods: ['GET', 'POST', 'PATCH'],
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT'],
   credentials: true,
 }));
 app.use(express.json({ limit: '50mb' }));

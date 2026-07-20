@@ -157,7 +157,7 @@ async function runMigrations() {
       ALTER TABLE ai_issues ADD COLUMN IF NOT EXISTS reproduction_steps TEXT;
     `);
 
-    // Ensure columns for user credits exist
+     // Ensure columns for user credits exist
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 1;
     `);
@@ -166,6 +166,9 @@ async function runMigrations() {
     `);
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS subscription_expires_at TIMESTAMP WITH TIME ZONE DEFAULT NULL;
+    `);
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_service_id INTEGER DEFAULT NULL;
     `);
 
     // 5. Credit Transactions Table
@@ -189,6 +192,31 @@ async function runMigrations() {
         status VARCHAR(50) DEFAULT 'active',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+    `);
+
+    // 6a. Add default-pool flags to python_services (idempotent)
+    await client.query(`
+      ALTER TABLE python_services ADD COLUMN IF NOT EXISTS is_default_free BOOLEAN DEFAULT FALSE;
+    `);
+    await client.query(`
+      ALTER TABLE python_services ADD COLUMN IF NOT EXISTS is_default_paid BOOLEAN DEFAULT FALSE;
+    `);
+
+    // 6b. Many-to-many: service <-> users assignment table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS service_user_assignments (
+        id SERIAL PRIMARY KEY,
+        service_id INTEGER NOT NULL REFERENCES python_services(id) ON DELETE CASCADE,
+        user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(service_id, user_id)
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sva_user ON service_user_assignments(user_id);
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_sva_service ON service_user_assignments(service_id);
     `);
 
     client.release();

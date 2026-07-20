@@ -19,42 +19,54 @@ const INTERNAL_BROADCAST_URL = process.env.MS_INTERNAL_BROADCAST_URL || `${_back
 
 /**
  * Resolves the appropriate Python service URL dynamically.
- * - If user is Paid and has a dedicated service assigned, returns that dedicated URL.
- * - Otherwise, load balances (randomly) across active non-dedicated services in the free pool.
- * - Fallback to env-defined PYTHON_SERVICE_URL if no services registered in DB.
+ * Priority:
+ *  1. Individual assignment via service_user_assignments (many-to-many) — picks randomly among assigned services
+ *  2. Default service for the user's tier (is_default_paid / is_default_free flag)
+ *  3. Round-robin across shared pool (is_dedicated = FALSE)
+ *  4. Env fallback
  */
 async function resolvePythonServiceUrl(userId) {
     try {
         if (userId) {
-            // Check if user is paid
+            // Fetch user tier and direct assigned service
             const userRes = await pool.query(
-                'SELECT subscription_tier FROM users WHERE id = $1',
+                'SELECT subscription_tier, assigned_service_id FROM users WHERE id = $1',
                 [userId]
             );
-            if (userRes.rows.length > 0) {
-                const tier = userRes.rows[0].subscription_tier || 'Free';
-                if (tier !== 'Free') {
-                    // Check if they have a dedicated active service assigned
-                    const serviceRes = await pool.query(
-                        "SELECT service_url FROM python_services WHERE assigned_user_id = $1 AND status = 'active' LIMIT 1",
-                        [userId]
-                    );
-                    if (serviceRes.rows.length > 0) {
-                        const url = serviceRes.rows[0].service_url;
-                        console.log(`[PythonBridge] Routing user ${userId} (${tier}) to dedicated instance: ${url}`);
-                        return url;
-                    }
+            const userObj = userRes.rows.length > 0 ? userRes.rows[0] : null;
+            const tier = userObj ? (userObj.subscription_tier || 'Free') : 'Free';
+            const assignedServiceId = userObj ? userObj.assigned_service_id : null;
+
+            // 1. Check direct service assignment on user profile
+            if (assignedServiceId) {
+                const assignRes = await pool.query(
+                    "SELECT service_url FROM python_services WHERE id = $1 AND status = 'active'",
+                    [assignedServiceId]
+                );
+                if (assignRes.rows.length > 0) {
+                    const url = assignRes.rows[0].service_url;
+                    console.log(`[PythonBridge] User ${userId} (${tier}) → directly assigned service: ${url}`);
+                    return url;
                 }
+            }
+
+            // 2. Default service for tier
+            const defaultCol = tier !== 'Free' ? 'is_default_paid' : 'is_default_free';
+            const defRes = await pool.query(
+                `SELECT service_url FROM python_services WHERE ${defaultCol} = TRUE AND status = 'active' LIMIT 1`
+            );
+            if (defRes.rows.length > 0) {
+                console.log(`[PythonBridge] User ${userId} (${tier}) → default ${tier} service: ${defRes.rows[0].service_url}`);
+                return defRes.rows[0].service_url;
             }
         }
 
-        // Get free pool active services
+        // 3. Shared pool round-robin
         const poolRes = await pool.query(
             "SELECT service_url FROM python_services WHERE is_dedicated = FALSE AND status = 'active'"
         );
         if (poolRes.rows.length > 0) {
-            const index = Math.floor(Math.random() * poolRes.rows.length);
-            const url = poolRes.rows[index].service_url;
+            const url = poolRes.rows[Math.floor(Math.random() * poolRes.rows.length)].service_url;
             console.log(`[PythonBridge] Routing to shared pool instance: ${url}`);
             return url;
         }
@@ -62,7 +74,7 @@ async function resolvePythonServiceUrl(userId) {
         console.warn('⚠️ pythonBridge: Error resolving python service from DB:', dbErr.message);
     }
 
-    // Default fallback
+    // 4. Env fallback
     return PYTHON_SERVICE_URL;
 }
 

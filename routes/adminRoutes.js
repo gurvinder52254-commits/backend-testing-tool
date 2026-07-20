@@ -8,6 +8,52 @@ const express = require('express');
 const router = express.Router();
 const { pool } = require('../config/db');
 const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
+const { spawn } = require('child_process');
+const path = require('path');
+const net = require('net');
+
+// ── Python Process Manager ────────────────────────────────────
+// Tracks spawned Python child processes: Map<serviceId, ChildProcess>
+const runningProcesses = new Map();
+
+// Base Python script directory (shared playwright browsers here)
+const PYTHON_SCRIPT_DIR = path.resolve(__dirname, '..', '..', 'pythone-Playwright');
+const PYTHON_EXE = process.env.PYTHON_EXE ||
+    'C:\\Users\\sukhs\\AppData\\Local\\Programs\\Python\\Python311\\python.exe';
+
+// Find a free TCP port starting from `from`
+function findFreePort(from = 8003) {
+    return new Promise((resolve, reject) => {
+        let port = from;
+        const tryPort = () => {
+            const srv = net.createServer();
+            srv.once('error', () => { port++; tryPort(); });
+            srv.once('listening', () => { srv.close(() => resolve(port)); });
+            srv.listen(port, '127.0.0.1');
+        };
+        tryPort();
+    });
+}
+
+function spawnPythonService(port, serviceId) {
+    const env = {
+        ...process.env,
+        PYTHON_SERVICE_PORT: String(port),
+        PLAYWRIGHT_BROWSERS_PATH: PYTHON_SCRIPT_DIR,
+        PYTHONUTF8: '1'
+    };
+    const child = spawn(PYTHON_EXE, ['main.py'], { cwd: PYTHON_SCRIPT_DIR, env, stdio: 'pipe' });
+    child.stdout.on('data', d => process.stdout.write(`[py:${port}] ${d}`));
+    child.stderr.on('data', d => process.stderr.write(`[py:${port}] ${d}`));
+    child.on('exit', (code) => {
+        console.log(`[py:${port}] exited with code ${code}`);
+        runningProcesses.delete(serviceId);
+    });
+    runningProcesses.set(serviceId, child);
+    return child;
+}
 const SESSION_SECRET = process.env.SESSION_SECRET || 'webtest_secret_default_key_123456';
 
 // Get admin credentials from env, or use defaults
@@ -126,7 +172,7 @@ router.get('/stats', async (req, res) => {
 
 /**
  * GET /api/admin/users
- * List all users with their mapped services
+ * List all users with their mapped services (from junction table)
  */
 router.get('/users', async (req, res) => {
     try {
@@ -134,7 +180,7 @@ router.get('/users', async (req, res) => {
             SELECT u.id, u.email, u.name, u.picture, u.credits, u.subscription_tier,
                    ps.service_url as assigned_service_url
             FROM users u
-            LEFT JOIN python_services ps ON ps.assigned_user_id = u.id
+            LEFT JOIN python_services ps ON ps.id = u.assigned_service_id
             ORDER BY u.created_at DESC
         `;
         const result = await pool.query(query);
@@ -191,14 +237,20 @@ router.patch('/users/:userId', async (req, res) => {
 
 /**
  * GET /api/admin/services
- * List all registered Python services
+ * List all registered Python services with assigned users array + default flags
  */
 router.get('/services', async (req, res) => {
     try {
         const query = `
-            SELECT ps.*, u.email as assigned_user_email, u.name as assigned_user_name
+            SELECT ps.*,
+                   COALESCE(
+                     (
+                       SELECT json_agg(json_build_object('user_id', u.id, 'email', u.email, 'name', u.name))
+                       FROM users u
+                       WHERE u.assigned_service_id = ps.id
+                     ), '[]'
+                   ) as assigned_users
             FROM python_services ps
-            LEFT JOIN users u ON ps.assigned_user_id = u.id
             ORDER BY ps.is_dedicated DESC, ps.created_at ASC
         `;
         const result = await pool.query(query);
@@ -310,6 +362,248 @@ router.delete('/services/:id', async (req, res) => {
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
+});
+
+/**
+ * GET /api/admin/services/health
+ * Live-ping every registered Python service and return real-time status
+ */
+router.get('/services/health', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT id, service_url FROM python_services ORDER BY created_at ASC');
+        const services = result.rows;
+
+        const pingService = (url) => new Promise((resolve) => {
+            const healthUrl = url.replace(/\/$/, '') + '/api/health';
+            const lib = healthUrl.startsWith('https') ? https : http;
+            const timeout = setTimeout(() => resolve({ url, alive: false, latencyMs: null }), 5000);
+            const start = Date.now();
+            try {
+                const req = lib.get(healthUrl, (r) => {
+                    clearTimeout(timeout);
+                    resolve({ url, alive: r.statusCode < 500, latencyMs: Date.now() - start });
+                    r.resume();
+                });
+                req.on('error', () => { clearTimeout(timeout); resolve({ url, alive: false, latencyMs: null }); });
+            } catch (_) {
+                clearTimeout(timeout);
+                resolve({ url, alive: false, latencyMs: null });
+            }
+        });
+
+        const results = await Promise.all(services.map(s => pingService(s.service_url).then(r => ({ id: s.id, ...r }))));
+        res.json({ success: true, health: results });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/users/:userId/assign-service
+ * Directly assign a dedicated Python service to a user from the User Allocations tab
+ */
+router.post('/users/:userId/assign-service', async (req, res) => {
+    const { userId } = req.params;
+    const { service_id } = req.body; // python_services.id
+
+    try {
+        if (service_id) {
+            // Assign the service directly to the user
+            const userUpdate = await pool.query(
+                'UPDATE users SET assigned_service_id = $1 WHERE id = $2 RETURNING *',
+                [service_id, userId]
+            );
+            if (userUpdate.rows.length === 0) {
+                return res.status(404).json({ success: false, error: 'User not found' });
+            }
+            return res.json({ success: true, message: 'Service assigned to user', user: userUpdate.rows[0] });
+        }
+
+        // service_id is null/empty => reset user to shared pool
+        await pool.query('UPDATE users SET assigned_service_id = NULL WHERE id = $1', [userId]);
+        res.json({ success: true, message: 'User reset to shared pool' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/services/:id/set-default
+ * Mark a service as the default for 'free' or 'paid' tier.
+ * Body: { tier: 'free' | 'paid' }
+ * Only one service can be default per tier at a time.
+ */
+router.post('/services/:id/set-default', async (req, res) => {
+    const { id } = req.params;
+    const { tier } = req.body; // 'free' or 'paid'
+
+    if (!['free', 'paid'].includes(tier)) {
+        return res.status(400).json({ success: false, error: "tier must be 'free' or 'paid'" });
+    }
+
+    const col = tier === 'free' ? 'is_default_free' : 'is_default_paid';
+    try {
+        // Clear existing default for that tier
+        await pool.query(`UPDATE python_services SET ${col} = FALSE`);
+        // Set new default
+        const result = await pool.query(
+            `UPDATE python_services SET ${col} = TRUE WHERE id = $1 RETURNING *`,
+            [id]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Service not found' });
+        }
+        res.json({ success: true, message: `Service set as default for ${tier} users`, service: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/services/:id/add-user
+ * Add a user to this service via the many-to-many junction table
+ * Body: { user_id: string }
+ */
+router.post('/services/:id/add-user', async (req, res) => {
+    const { id } = req.params;
+    const { user_id } = req.body;
+
+    if (!user_id) return res.status(400).json({ success: false, error: 'user_id required' });
+
+    try {
+        await pool.query(
+            `INSERT INTO service_user_assignments (service_id, user_id)
+             VALUES ($1, $2) ON CONFLICT (service_id, user_id) DO NOTHING`,
+            [id, user_id]
+        );
+        res.json({ success: true, message: 'User added to service' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/admin/services/:id/remove-user/:userId
+ * Remove a specific user from a service (junction table)
+ */
+router.delete('/services/:id/remove-user/:userId', async (req, res) => {
+    const { id, userId } = req.params;
+    try {
+        await pool.query(
+            'DELETE FROM service_user_assignments WHERE service_id = $1 AND user_id = $2',
+            [id, userId]
+        );
+        res.json({ success: true, message: 'User removed from service' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/services/create
+ * Spawn a brand-new Python service on the next free port and register it in the DB
+ */
+router.post('/services/create', async (req, res) => {
+    try {
+        const { is_dedicated = false, assigned_user_id = null, label = '' } = req.body;
+
+        // Find next free port (skip 8000-8002 which are the manual ones)
+        const port = await findFreePort(8003);
+        const serviceUrl = `http://127.0.0.1:${port}`;
+
+        // Register in DB first
+        const dbResult = await pool.query(
+            `INSERT INTO python_services (service_url, is_dedicated, assigned_user_id, status)
+             VALUES ($1, $2, $3, 'starting') RETURNING *`,
+            [serviceUrl, is_dedicated, assigned_user_id || null]
+        );
+        const service = dbResult.rows[0];
+
+        // Spawn the Python process
+        spawnPythonService(port, service.id);
+
+        // Give it 3 seconds to start, then mark active
+        setTimeout(async () => {
+            try {
+                await pool.query(
+                    `UPDATE python_services SET status = 'active' WHERE id = $1`,
+                    [service.id]
+                );
+            } catch (_) {}
+        }, 3000);
+
+        res.status(201).json({
+            success: true,
+            message: `Python service started on port ${port}`,
+            service: { ...service, status: 'starting', port }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/services/:id/stop
+ * Stop (kill) a running Python service process
+ */
+router.post('/services/:id/stop', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const child = runningProcesses.get(parseInt(id));
+        if (child) {
+            child.kill('SIGTERM');
+            runningProcesses.delete(parseInt(id));
+        }
+        await pool.query(`UPDATE python_services SET status = 'inactive' WHERE id = $1`, [id]);
+        res.json({ success: true, message: 'Service stopped' });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/services/:id/restart
+ * Restart a Python service (kill old, spawn new on same port)
+ */
+router.post('/services/:id/restart', async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Get the service URL/port
+        const svcRes = await pool.query('SELECT * FROM python_services WHERE id = $1', [id]);
+        if (svcRes.rows.length === 0) return res.status(404).json({ success: false, error: 'Service not found' });
+
+        const svc = svcRes.rows[0];
+        const urlMatch = svc.service_url.match(/:(\d+)$/);
+        if (!urlMatch) return res.status(400).json({ success: false, error: 'Cannot parse port from URL' });
+
+        const port = parseInt(urlMatch[1]);
+
+        // Kill existing
+        const existing = runningProcesses.get(parseInt(id));
+        if (existing) { existing.kill('SIGTERM'); runningProcesses.delete(parseInt(id)); }
+
+        // Wait briefly then respawn
+        await pool.query(`UPDATE python_services SET status = 'starting' WHERE id = $1`, [id]);
+        setTimeout(() => {
+            spawnPythonService(port, parseInt(id));
+            setTimeout(async () => {
+                try { await pool.query(`UPDATE python_services SET status = 'active' WHERE id = $1`, [id]); } catch (_) {}
+            }, 3000);
+        }, 1000);
+
+        res.json({ success: true, message: `Restarting service on port ${port}` });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+/**
+ * GET /api/admin/services/processes
+ * List which service IDs have active spawned processes
+ */
+router.get('/services/processes', async (req, res) => {
+    const activeIds = [...runningProcesses.keys()];
+    res.json({ success: true, activeProcessIds: activeIds });
 });
 
 module.exports = router;
